@@ -88,3 +88,27 @@ macFUSE 的小块写入回归使 1–14 字节用例必须逐个运行，不能�
 2026-09-09：新增行为按红、绿循环实现；回归验证覆盖 FIFO 阻塞和读回期间同名文件替换。
 `scripts/check.sh` 严格 Release、CoreChecks、CLI、只读边界、本地签名包和负向 fixture 通过。
 依赖安装镜像已正常卸载；待确认的实验进程和其新建测试镜像保留，未强制终止或绕过锁。
+
+## 用户处理提示后的复测（2026-09-09）
+
+- 用户告知已手动处理原提示；原等待进程已确认退出，日志最终为扩展未启用及挂载失败。
+- 使用同一 128 MiB 镜像重新尝试，系统进入扩展启动阶段，但 mount 返回 69；
+  `fskitd` / `fskit_agent` 报 ExtensionKit Code 2、Cocoa 4099。
+  `extensionkitservice` 报 `_EXExtensionIdentity` 初始化失败 Code 5，XPC 解码得到 nil。
+  实际挂载表无实验卷，不能进入文件写入。
+- LaunchServices 中两个扩展均指向正式 `/Library/Filesystems/macfuse.fs` 安装位置；
+  正式 app 的 deep/strict 签名验证通过，系统版本为 macOS 26.6.2（25G83）。
+- 对本次请求使用的当前用户 ExtensionKit 服务正常发送 SIGTERM，确认旧服务退出。
+  用独立新建的第二个 128 MiB 镜像复测，新服务仍出现相同 Code 5 / XPC 解码失败。
+  因此不能声称单独重启此服务修复了问题。
+- 随后向当前用户 `fskit_agent` 发送普通 SIGTERM；尚未确认其退出，不把请求当成重启成功。
+  官方 `macfuse install --components file-system-extensions` 返回 0；尚无随后成功挂载证据。
+- 两个实验挂载均采样确认等待 `CFUserNotificationDisplayAlert`。已发出普通终止请求，
+  尚未确认进程静止；没有强制终止、绕过镜像锁或继续叠加挂载尝试。用户已被请求手动关闭
+  新提示并提供完整文字。UI 工具此前因安全限制拒绝访问系统提示中心，不尝试绕过限制。
+- USB 仍为原生 NTFS 只读挂载，本次未写入、卸载或格式化物理盘。实验镜像保留。
+
+当前推测是扩展身份/注册状态问题，尚未证实根因。macFUSE 官方曾记录重新注册扩展后的
+FSKit/PluginKit 状态问题，但该历史说明不能证明本机的具体原因：
+[官方 5.2.0 发布说明](https://macfuse.github.io/2026/04/09/macfuse-5.2.0.html)。
+下一步先关闭待处理错误提示，确认进程退出，再判断是否需要用户重新登录或重启系统。
