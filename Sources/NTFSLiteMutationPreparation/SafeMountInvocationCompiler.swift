@@ -149,7 +149,8 @@ public enum SafeMountInvocationCompilationError: Error, Equatable, Sendable {
 /// Compiles a `MountPlan` into the only writable mount command accepted by the
 /// MVP policy. The compiler cannot add shell syntax or arbitrary mount options.
 public struct SafeMountInvocationCompiler: Sendable {
-    private static let fixedOptions = "rw,backend=fskit,norecover"
+    // NTFS-3G otherwise silently adds cross-user and nonempty-mount defaults.
+    private static let fixedOptions = "rw,no_def_opts,backend=fskit,norecover"
 
     private let trustedArtifact: TrustedNTFS3GArtifactCapability
 

@@ -9,6 +9,7 @@ swift build -c release -Xswiftc -warnings-as-errors
 binary_dir=$(swift build -c release --show-bin-path)
 "$binary_dir/NTFSLiteCoreChecks"
 python3 scripts/check-gate1-cli-input.py
+python3 -m unittest discover -s scripts/write-validation -p 'test_*.py'
 
 # The builder checks source/package boundaries and verifies the signed bundle.
 scripts/build-local-read-only-app.sh

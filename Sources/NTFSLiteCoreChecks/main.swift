@@ -13093,7 +13093,7 @@ func safeMountCompilerEmitsOnlyTheFixedValidatedInvocation() {
                         "/dev/disk9s1",
                         "/Volumes/ARCHIVE",
                         "-o",
-                        "rw,backend=fskit,norecover",
+                        "rw,no_def_opts,backend=fskit,norecover",
                     ],
                 "the mount compiler should emit the fixed FSKit no-recovery invocation"
             )
@@ -13101,7 +13101,7 @@ func safeMountCompilerEmitsOnlyTheFixedValidatedInvocation() {
                 compiled.arguments[3].split(separator: ",").map(String.init)
             )
             expect(
-                optionTokens == ["rw", "backend=fskit", "norecover"],
+                optionTokens == ["rw", "no_def_opts", "backend=fskit", "norecover"],
                 "the mount invocation must contain exactly the approved option tokens"
             )
             expect(

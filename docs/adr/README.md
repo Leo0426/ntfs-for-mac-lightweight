@@ -12,6 +12,7 @@
 - [0006 — 把 Setup 冲突完整性绑定到具名候选范围](0006-scope-setup-conflict-evidence.md)
 - [0007 — 把有界 Gate 证据工具链与正式应用分开](0007-separate-bounded-gate-evidence.md)
 - [0008 — 用已挂载文件系统 UUID 补充只读候选身份](0008-supplement-candidate-identity-from-mounted-filesystem.md)
+- [0009 — 把已授权的 macOS 写入实验与正式应用分开](0009-isolate-local-write-validation.md)
 
 后续若引入真实 XPC、helper 安装、提权、应用签名/公证或磁盘执行器，应先判断是否形成新的
-难以逆转边界；满足 ADR 条件时按顺序新增 `0009-*.md`，不得用修改本索引代替决策记录。
+难以逆转边界；满足 ADR 条件时按顺序新增 `0010-*.md`，不得用修改本索引代替决策记录。

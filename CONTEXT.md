@@ -184,3 +184,12 @@ _Avoid_: Media Generation, Persistent Revision, System Evidence
 完成声明核对后的短生命周期结果；它只证明本次人为角色策略通过，不是 `VolumeSnapshot`、System
 Evidence 或 Mutation 资格。未来 Gate 4 仍必须把它与 fresh 系统事实重新核对。
 _Avoid_: Trusted Snapshot, Persistent Allowlist, Write Capability
+
+
+## 已授权的隔离写入实验
+
+2026-09-09 起按 [ADR 0009](docs/adr/0009-isolate-local-write-validation.md) 使用独立
+`scripts/write-validation/` 文件语义库验证可牺牲介质。该库没有挂载资格判断或系统执行器，
+调用方负责确认目标与实际可写挂载；临时目录检查不能证明 NTFS 通过。Windows 复核按用户
+要求后置，实验结果不改变正式应用只读边界或 Gate 状态。当前证据见
+[实验计划](.scratch/write-delete-validation/PLAN.md)。

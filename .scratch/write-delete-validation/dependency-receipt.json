@@ -1,0 +1,68 @@
+{
+  "artifacts": [
+    {
+      "file": "macfuse-5.4.0.dmg",
+      "source_url": "https://github.com/macfuse/macfuse/releases/download/macfuse-5.4.0/macfuse-5.4.0.dmg",
+      "sha256": "861814f0ac7fa8f6547ea40cdd49a36ac84bcc7d34f38a1fa74e8cf68b0401c5",
+      "bytes": 16512456,
+      "matches_repository_pin": true
+    },
+    {
+      "file": "ntfs-3g_ntfsprogs-2026.7.7.tgz",
+      "download_failed": "HTTP Error 403: Forbidden"
+    }
+  ],
+  "installed": true,
+  "inner_code_identity_verified": true,
+  "approved_for_production": false,
+  "ntfs3g_source_checkout": {
+    "upstream": "https://github.com/tuxera/ntfs-3g",
+    "tag": "2026.7.7",
+    "commit": "d327833ec1d5eb1358b6f2c37139f10a3460944d",
+    "matches_repository_pin": true,
+    "built": true
+  },
+  "macfuse_image_checksum_verified": true,
+  "validated_on": "2026-09-09",
+  "production_approved": false,
+  "macfuse_installer": {
+    "version": "5.4.0",
+    "team_id": "3T5GSNBU6W",
+    "signer": "Developer ID Installer: Benjamin Fleischer (3T5GSNBU6W)",
+    "notarization": "accepted",
+    "installation": "pkgutil core receipt 5.4.0",
+    "enabled_backend": "FSKit",
+    "kernel_backend_used": false
+  },
+  "build": {
+    "source": "git archive of pinned HEAD",
+    "flags": [
+      "--with-fuse=external",
+      "--disable-mount-helper",
+      "--disable-ldconfig",
+      "--disable-library",
+      "--disable-mtab",
+      "--disable-plugins",
+      "--disable-shared"
+    ],
+    "CFLAGS": "-O2 -mmacosx-version-min=15.4",
+    "global_ntfs_install": false
+  },
+  "built_artifacts": [
+    {
+      "file": "src/ntfs-3g",
+      "bytes": 332200,
+      "sha256": "95ea1bb325cfc39f0c76999e4d98049bdd58f51929e0152432828d4d3cd4d2fc"
+    },
+    {
+      "file": "src/ntfs-3g.probe",
+      "bytes": 294032,
+      "sha256": "c917ddbf3c2350513d534139ef38dbb55b6c7a52957832e4744e3f77e82a625b"
+    },
+    {
+      "file": "ntfsprogs/mkntfs",
+      "bytes": 363832,
+      "sha256": "7790efde233476963eae4509581be220cbb1de991eb6bec3a1a2ab4824aec929"
+    }
+  ]
+}
