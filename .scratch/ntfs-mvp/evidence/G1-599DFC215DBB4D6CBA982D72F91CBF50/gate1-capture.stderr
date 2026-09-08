@@ -1,0 +1,12 @@
+Gate 1 只读证据记录已启动。此工具不会挂载、卸载、推出或修改磁盘。
+固定命令：
+  status
+  seal
+  checkpoint <kind> <confirmed|contradicted|notPerformed>
+  checkpoint <systemInventoryComparison|mountTableComparison> <1...100> <finding>
+applicationRestart 表示重启正式只读 App；证据工具自身保持运行。
+状态=recording 观测=26 检查点=0 循环=0/100 未确认移除=1 失败码=none
+检查点已记录：strictReleaseChecks。
+检查点已记录：readOnlyBoundaryReview。
+SHA-256: d656cf96795bb39c6b0027da68d0287de81db604000f6190917e428c311303a7
+状态=sealed 观测=29 检查点=2 循环=0/100 未确认移除=1 失败码=none

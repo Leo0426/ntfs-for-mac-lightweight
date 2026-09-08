@@ -1,0 +1,24 @@
+# SwiftPM and local application bundles
+/.build/
+/.swiftpm/
+
+# Standalone Swift compiler outputs
+/*.abi.json
+/*.swiftdoc
+/*.swiftmodule
+/*.swiftsourceinfo
+
+# Local machine/editor files and credentials
+.DS_Store
+*.swp
+*.swo
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.key
+__pycache__/
+*.pyc
+
+# .scratch/ntfs-mvp contains versioned issues and anonymized Gate evidence.

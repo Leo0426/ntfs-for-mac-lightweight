@@ -1,0 +1,220 @@
+[0/1] Planning build
+Building for production...
+[0/2] Write swift-version--1AB21518FC5DEDBE.txt
+[1/3] Write sources
+[3/4] Compiling NTFSLiteSystem DiskArbitrationEventSource.swift
+[4/8] Compiling NTFSLiteMutationPreparation HelperRequestCompiler.swift
+[5/8] Compiling NTFSLitePresentation NTFSLitePresentation.swift
+[6/8] Compiling NTFSLiteDiagnostics DiagnosticApplicationIdentity.swift
+[7/8] Compiling NTFSLiteGateEvidence Gate1EvidenceRecorder.swift
+[8/9] Compiling NTFSLiteCoreChecks main.swift
+[8/10] Write Objects.LinkFileList
+[9/10] Linking NTFSLiteCoreChecks
+Build of product 'NTFSLiteCoreChecks' complete! (27.11s)
+PASS: healthy external NTFS volume can begin enabling write access
+PASS: hibernated volume cannot begin enabling write access
+PASS: unsafe and out-of-scope volumes expose specific write blocks
+PASS: duplicate write request does not start another operation
+PASS: successful unmount requests a fresh safety snapshot
+PASS: fresh clean unmounted snapshot produces the fixed safe mount plan
+PASS: health change after unmount prevents writable mount
+PASS: changed media generation invalidates pending write operation
+PASS: stale operation completion is ignored
+PASS: mount command success requests verification instead of claiming writable
+PASS: verified mount facts expose writable state
+PASS: incomplete or mismatched mount evidence never claims writable
+PASS: writable volume eject begins by unmounting the whole physical disk
+PASS: unmount callback only requests fresh physical-disk inspection
+PASS: all sibling volumes unmounted allows standard eject
+PASS: mounted sibling prevents eject
+PASS: busy unmount never produces a force operation
+PASS: eject callback does not claim safe to remove
+PASS: only fresh matching absence marks safe to remove
+PASS: failed eject command never claims safe to remove
+PASS: write blocks never prevent safe eject
+PASS: internal and Boot Camp volumes never emit whole-disk eject mutations
+PASS: physical-disk ejectability gates coordinator and final preflight
+PASS: coordinator and preflight reject a protected sibling
+PASS: eject preflight rejects a child that remounted after inspection
+PASS: verified whole-disk absence revokes every sibling workflow
+PASS: removal before eject callback still reaches verified safe removal
+PASS: failed final eject preserves fresh sibling mount facts
+PASS: malformed whole-disk inventories fail closed
+PASS: definitive whole-disk unmount failure requires reconciliation
+PASS: normal eject inspections retain the lease until facts are complete
+PASS: present uncertainty reconciliation refreshes every sibling
+PASS: early removal outranks a later definitive eject failure
+PASS: removal cannot bypass uncertain whole-disk reconciliation
+PASS: eject timeout or cancellation requires quiescence and whole-disk reconciliation
+PASS: volume coordinator serializes sibling mutations and ignores stale completion
+PASS: inventory rebuild targets only the current media instance
+PASS: MountEngine executes only the claimed current semantic effect
+PASS: MountEngine rejects old instances and replays without invocation
+PASS: MountEngine distinguishes termination and fresh-evidence scope
+PASS: MountEngine confirmed quiescence unlocks only fresh reconciliation
+PASS: MountEngine unconfirmed termination retains its lease and callback gate
+PASS: closure mutation termination cannot be discarded as confirmed quiescence
+PASS: mutation execution rejects reinserted, stale, and duplicate effects
+PASS: setup assessment fails closed with actionable issues
+PASS: setup readiness gates write requests and every write mutation
+PASS: stale write request cannot rebind to a replacement media instance
+PASS: final volume evidence is read after potentially slow setup facts
+PASS: mount preflight revalidates complete fresh volume facts
+PASS: write preflight fails closed and preserves fresh safety reasons
+PASS: workflow initialization reflects actual mount access
+PASS: verified writable is revoked by detach or replacement
+PASS: physical-disk lifecycle events atomically invalidate every sibling
+PASS: system evidence media change invalidates every sibling
+PASS: disk removal keeps an executing mutation tombstone until the process stops
+PASS: settled write failures and inspection timeouts reach a terminal state
+PASS: command timeout or cancellation keeps the disk lease until quiesced and reconciled
+PASS: mutation callbacks cannot bypass or outrun the one-shot executor
+PASS: delayed unmount observation retries until fresh facts or timeout
+PASS: presentation layer keeps safety actions explicit
+PASS: VolumePresentation uses a fixed action and disable matrix
+PASS: setup presentation shows a ready environment
+PASS: setup presentation normalizes actionable failures without leaking driver names
+PASS: setup presentation fails closed while refreshing
+PASS: read-only Setup guide leads to recheck and reports completion
+PASS: read-only Setup feedback uses stable visible and accessible text
+PASS: setup presentation preserves typed trust evidence
+PASS: contradictory Setup reports fail closed across facts and presentation
+PASS: matching read-only system evidence produces an unknown-health snapshot
+PASS: volume name alone never claims Boot Camp identity
+PASS: unknown external NTFS is visible only as a read-only candidate
+PASS: conflicting parent location removes a read-only candidate
+PASS: conflicting whole-disk identity removes a read-only candidate
+PASS: unverified enumeration coverage does not expose a read-only candidate
+PASS: unresolved sibling topology does not expose a read-only candidate
+PASS: read-only candidates reject every additional fact problem
+PASS: an existing read-write mount remains unverified for a read-only candidate
+PASS: a reinserted candidate does not reuse the old selection
+PASS: a confirmed current data-volume declaration produces only a request approval
+PASS: a data-volume declaration request cannot be consumed twice
+PASS: a data-volume declaration does not cross session rotation or restart
+PASS: a data-volume declaration requires the current observation revision
+PASS: a data-volume declaration rejects instance and sibling topology drift
+PASS: an incomplete data-volume role observation cannot approve a declaration
+PASS: a data-volume declaration cannot override candidate eligibility
+PASS: protected or conflicting siblings override a data-volume declaration
+PASS: invalid sibling topology cannot approve a data-volume declaration
+PASS: an external Windows system candidate remains unknown without confirmation
+PASS: trusted protected and data roles map while unknown or conflicting roles fail closed
+PASS: contradictory mounted evidence fails closed
+PASS: malformed read-only identities never produce trusted snapshots
+PASS: mount source parser accepts only canonical local disk devices
+PASS: live mount table reader produces read-only facts
+PASS: mount table reader requires two consecutive stable snapshots
+PASS: live Disk Arbitration stream produces read-only descriptions
+PASS: live IOMedia enumeration produces a stable read-only snapshot
+PASS: multi-volume inventory shares one generation and deduplicates callbacks
+PASS: inventory never treats startup silence as a complete empty system
+PASS: independent IOMedia coverage must exactly match the DA inventory
+PASS: IOMedia enumeration requires two consecutive stable snapshots
+PASS: inventory fails closed after unidentifiable or parentless events
+PASS: inventory excludes only explicit network volume events
+PASS: Disk Arbitration boolean decoder accepts only CFBoolean
+PASS: read-only observer settles without claiming enumeration coverage
+PASS: read-only observer promotes only exact independent coverage
+PASS: read-only observer coverage timeout fails closed
+PASS: observer publishes settled incomplete evidence without fabricating snapshots
+PASS: live read-only observer settles the current system
+PASS: live read-only observer verifies independent enumeration coverage
+PASS: mount path validator separates canonical paths from symlinks and dot segments
+PASS: whole-disk disappearance rotates generation after an incomplete change
+PASS: Gate 1 evidence header accepts only opaque evidence IDs
+PASS: Gate 1 evidence without hardware cycles stays incomplete
+PASS: Gate 1 evidence status exposes only anonymous bounded progress
+PASS: Gate 1 evidence projects candidate without raw identity or mutation eligibility
+PASS: Gate 1 evidence normalizes equivalent volume UUID case
+PASS: Gate 1 evidence counts only a confirmed present-to-absent cycle
+PASS: Gate 1 evidence permanently fails when generation changes before absence
+PASS: Gate 1 evidence fails when generation is reused after confirmed absence
+PASS: Gate 1 evidence fails when generation regresses after confirmed absence
+PASS: Gate 1 evidence fails when generation is unknown after confirmed absence
+PASS: Gate 1 evidence tracks 100 synthetic cycles without awarding Gate pass
+PASS: Gate 1 evidence records only closed operator checkpoints
+PASS: Gate 1 evidence operator command parser accepts only closed grammar
+PASS: Gate 1 evidence invalid checkpoint fails closed permanently
+PASS: Gate 1 evidence becomes ready only for human review after every requirement
+PASS: Gate 1 evidence requires a final verified observation for review readiness
+PASS: Gate 1 evidence keeps only fixed issue meaning from incomplete observations
+PASS: Gate 1 evidence observation limit fails closed without evicting old evidence
+PASS: Gate 1 evidence policy rejects zero and unsealable budgets
+PASS: Gate 1 evidence rejects comparisons outside their target cycle
+PASS: Gate 1 evidence does not aggregate different reviewable disks
+PASS: Gate 1 evidence rejects duplicate volume topology atomically
+PASS: Gate 1 evidence rejects typed UUID-case alias topology
+PASS: Gate 1 evidence does not count media already present at session start
+PASS: Gate 1 evidence counts pending then verified insertion exactly once
+PASS: Gate 1 evidence ignores permanent non-target connections for readiness
+PASS: Gate 1 evidence source termination is permanently failed closed
+PASS: Gate 1 evidence rejects every event after permanent failure
+PASS: Gate 1 evidence timestamp regression fails closed permanently
+PASS: Gate 1 evidence checkpoint limit fails closed without evicting old evidence
+PASS: Gate 1 evidence disk limit rejects the whole observation atomically
+PASS: Gate 1 evidence rejects duplicate physical disk topology atomically
+PASS: Gate 1 evidence volume limit rejects the whole observation atomically
+PASS: Gate 1 evidence encoded byte limit fails closed without oversized output
+PASS: Gate 1 evidence verifier admits only the matching canonical artifact
+PASS: Gate 1 evidence seal is idempotent and closes every input
+PASS: Gate 1 evidence verifier rejects duplicate JSON members before decoding
+PASS: Gate 1 evidence verifier rejects unknown schema fields and invalid header
+PASS: Gate 1 evidence verifier recomputes the derived verdict
+PASS: Gate 1 evidence verifier replays events instead of trusting summaries
+PASS: Gate 1 evidence verifier rejects forbidden generation relations
+PASS: Gate 1 evidence verifier accepts canonical order after flipped reconnect input
+PASS: semantic version parser handles trusted dependency output
+PASS: setup fails closed when authorization or conflict scan is unknown
+PASS: setup environment evidence maps to explicit facts
+PASS: live system setup facts loader fails closed on unverified capabilities
+PASS: live Setup probe provider exposes only typed bounded output
+PASS: inherited output pipes cannot keep a completed Setup probe alive
+PASS: Setup probe output overflow terminates within its fixed bound
+PASS: cancelling a Setup probe confirms its direct process stopped
+PASS: read-only dashboard never exposes mutation controls or raw identifiers
+PASS: read-only dashboard groups and sorts long-named partitions deterministically
+PASS: read-only selection waits for stable absence before resetting
+PASS: an observation subscription change resets an otherwise identical selection
+PASS: read-only selection never resolves a stale volume across refreshes
+PASS: accessibility announcement describes the current selection
+PASS: read-only diagnostic feedback uses stable visible and accessible text
+PASS: diagnostics retains only typed bounded deterministic entries
+PASS: setup output parsers reject ambiguity and unknown records
+PASS: setup probe evaluator requires exact FSKit election and complete conflict evidence
+PASS: candidate-scoped conflict catalog requires every bounded evidence source
+PASS: live conflict footprint provider uses no-follow tri-state traversal
+PASS: system Setup loader consumes injected scoped footprint evidence
+PASS: diagnostic projection drops raw domain poison values
+PASS: NTFS health parser accepts only canonical bounded evidence
+PASS: safe mount compiler emits only the fixed validated invocation
+PASS: helper protocol round-trips only strict structured requests
+PASS: trusted bundle version reader rejects untrusted filesystem evidence
+PASS: trusted macFUSE evidence rejects mixed filesystem epochs
+PASS: diagnostics retention is bounded by age and encoded bytes
+PASS: coordinator effects compile into exactly four helper mutations
+PASS: trusted executable verifier pins the exact opened artifact
+PASS: diagnostic application identity uses only strict bundle metadata
+PASS: system setup report preserves fixed dependency failure evidence
+PASS: diagnostic snapshot archive persists only canonical private evidence
+PASS: read-only observation session rejects every stale refresh result
+PASS: read-only observer finishes and keeps the first zero-delay event
+PASS: read-only observation capture drains accepted events before its seal barrier
+PASS: read-only observation capture distinguishes natural source end from drain
+PASS: read-only observation capture reports an unverified final drain snapshot
+PASS: helper admission is the only atomic bounded request entry point
+PASS: MountEngine adapter routes each claimed command to its concrete action
+PASS: MountEngine adapter never infers quiescence from a deadline or cancellation
+PASS: MountEngine adapter forwards the routed action and maps the observation
+PASS: MountEngine adapter execution-unavailable path always fails closed
+PASS: MountEngine adapter invocation satisfies the engine contract and keeps the lease when unconfirmed
+PASS: read-only dashboard treats non-NTFS partition gaps as an empty system, not a read failure
+PASS: read-only volume mapper accepts APFS snapshot BSD names and still rejects malformed identities
+PASS: mounted NTFS filesystem UUID supplies a missing read-only candidate identity
+PASS: supplemental NTFS identity rejects conflicts and preserves every existing safety constraint
+PASS: filesystem UUID decoding rejects absent, truncated, unknown and zero attributes
+PASS: native filesystem UUID is bound to the expected local mount and rejects stale mount facts
+PASS: stable mount snapshots compare and forward filesystem UUID evidence
+PASS: missing NTFS identity is explained without selectable or mutation authority
+PASS: NTFS identity explanations handle invalid, mixed, uncertain, refreshed and absent observations
+PASS: native mount identity failures remain incomplete even when DA reports a UUID

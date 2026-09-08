@@ -1,0 +1,16 @@
+{
+  "candidateCount" : 1,
+  "coordinatorInventoryPresent" : false,
+  "dashboardDetail" : "卷身份和只读状态已经核对，但用途仍未确认。可以查看状态，所有变更操作继续关闭。",
+  "dashboardTitle" : "检测到 1 个 NTFS 卷",
+  "displayedAccess" : [
+    "只读"
+  ],
+  "displayedVolumeCount" : 1,
+  "drained" : true,
+  "nativeIdentitySupplementUsed" : true,
+  "purposeUnconfirmed" : true,
+  "scope" : "production observation and presentation; no window or Setup validation",
+  "topLevelIssueCount" : 0,
+  "writeControlsAvailable" : false
+}

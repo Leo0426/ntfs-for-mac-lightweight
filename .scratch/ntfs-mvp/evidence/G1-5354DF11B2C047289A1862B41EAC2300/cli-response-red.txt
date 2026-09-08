@@ -1,0 +1,1 @@
+AssertionError: CLI did not respond while stdin remained open

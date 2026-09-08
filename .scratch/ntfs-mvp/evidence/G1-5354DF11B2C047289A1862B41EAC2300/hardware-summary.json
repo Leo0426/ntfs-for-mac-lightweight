@@ -1,0 +1,38 @@
+{
+  "architecture": "arm64",
+  "bus": "USB",
+  "diskArbitration": {
+    "internal": false,
+    "mediaUUIDPresent": true,
+    "ntfs": true,
+    "volumeUUIDPresent": false
+  },
+  "diskMutationsByAgent": 0,
+  "diskutilPartitionUUIDPresent": true,
+  "diskutilVolumeUUIDPresent": false,
+  "ejectable": true,
+  "external": true,
+  "fileSystem": "ntfs",
+  "hardwareAlias": "USB-1",
+  "macModel": "Mac15,9",
+  "macOS": "26.6.2",
+  "macOSBuild": "25G83",
+  "mountFlags": [
+    "ntfs",
+    "local",
+    "nodev",
+    "nosuid",
+    "read-only",
+    "noowners",
+    "noatime",
+    "fskit"
+  ],
+  "partitionCount": 2,
+  "physicalBytes": 32212254720,
+  "removable": true,
+  "repeatedVolumeInfoEqual": true,
+  "sacrificialMediaAuthorization": "userConfirmed",
+  "volumeBytes": 32000442368,
+  "windowsReview": "notVerified",
+  "writableVolume": false
+}
