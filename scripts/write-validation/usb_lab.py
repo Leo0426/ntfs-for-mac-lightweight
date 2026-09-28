@@ -30,7 +30,7 @@ from user_mount_candidate import (candidate, DRIVER_SHA256, MOUNT_UID, MOUNT_GID
                                   filesystem_identity, unmount_credentials)
 
 BASE = Path(__file__).resolve().parents[2]
-TARGET_DIGEST = '04c857229a658d11046b5ba4b63bb863a89a18b44377ed735c4d6df2f3bdb2f8'
+TARGET_DIGEST = '8d76fcf2d907e33a0655489a359b99d41e719527b4b3b5163311c0c47b9cc39d'
 BUILD = BASE / '.build/dependency-candidates/ntfs-3g-build'
 OPTIONS = 'rw,no_def_opts,backend=fskit,norecover,no_detach,local,quiet'
 ARTIFACTS = {

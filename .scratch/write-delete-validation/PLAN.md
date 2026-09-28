@@ -342,3 +342,17 @@ FSKit/PluginKit 状态问题，但该历史说明不能证明本机的具体原�
   `MOUNT_UID` 一致；工具说明中的绝对路径改为仓库相对命令。历史记录中的旧路径保持原样。
 - 同日只读 `--inspect` 返回 `blocked/targetQuery/targetAbsentOrAmbiguous`，无磁盘变更。
   下一步由用户连接原 U310 并回传 `--inspect`；USB 闭环与 Windows 复核仍未通过。
+
+## 更换可牺牲目标盘与 macOS 27 依赖缺失（2026-09-28）
+
+- 用户在对话中指定并授权新的可牺牲 USB 盘（XMUP22YM，124,623,257,600 字节，外置 USB，
+  原内容仅为 macOS 27 安装器），允许格式化及后续实验；U310 不再是固定目标。
+- 新增一次性 `prepare_usb_target.py`：固定型号/容量/USB 外置/原卷名，GPT 抹盘后用固定摘要
+  mkntfs 快速格式化，等待原生只读挂载后独占写私有回执。用户 sudo 运行成功：
+  `targetConfirmed → diskErased → ntfsFormatted → targetPrepared`，数据分区 124,411,445,248 字节，
+  `/Volumes/NTFSLAB` 为原生 NTFS 只读。旧 U310 回执保留为 `approved-usb-target-previous.json`。
+- `usb_lab.py` 的 `TARGET_DIGEST` 已改为新回执摘要；`--inspect` 通过目标查询，但在
+  `dependencyCheck` 报 `ENOENT`：系统已升级到 macOS 27.0（26A428），`macfuse.fs` 与
+  `libfuse.2.dylib` 均不存在。缓存的 macFUSE 5.4.0 DMG 摘要与固定值一致、镜像校验通过。
+  macFUSE 5.4.0 在 macOS 27.0 上的兼容性尚未验证；重新安装和启用扩展由用户执行。
+- `scripts/check.sh` 退出 0（72 项实验测试）。USB 写删、重挂载读回与 Windows 复核仍未通过。
