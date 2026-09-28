@@ -221,7 +221,10 @@ def prepare(root, large_bytes=0, run_id=None, progress=lambda _: None):
 
 
 def validate_manifest(manifest):
-    if (set(manifest) != {'schema', 'directory', 'files', 'deleted', 'checks', 'status', 'windowsVerified'}
+    if (not isinstance(manifest, dict)
+            or set(manifest) != {'schema', 'directory', 'files', 'deleted', 'checks', 'status', 'windowsVerified'}
+            or not isinstance(manifest['directory'], str)
+            or not re.fullmatch(r'ntfslite-check-[0-9a-f]{32}', manifest['directory'])
             or manifest['schema'] != 1 or manifest['windowsVerified'] is not False
             or manifest['status'] != 'fileChecksPassed' or manifest['deleted'] != DELETED
             or not isinstance(manifest['files'], dict) or not manifest['files']
@@ -231,7 +234,7 @@ def validate_manifest(manifest):
             or manifest['checks'] != (34 if 'large.bin' in manifest['files'] else 33)):
         raise ValidationError('invalidManifest')
     for value in manifest['files'].values():
-        if (set(value) != {'bytes', 'sha256'} or type(value['bytes']) is not int
+        if (not isinstance(value, dict) or set(value) != {'bytes', 'sha256'} or type(value['bytes']) is not int
                 or not 0 <= value['bytes'] <= 4 * 1024**3 + 1
                 or not isinstance(value['sha256'], str)
                 or not re.fullmatch('[0-9a-f]{64}', value['sha256'])):
@@ -247,6 +250,9 @@ def verify(root, manifest):
             workspace.verify_file(name, expected)
         for name in manifest['deleted']:
             workspace.absent(name)
+        if set(os.listdir(workspace.fd)) != set(manifest['files']):
+            raise ValidationError('unexpectedEntries')
+        workspace.check()
 
 
 def cleanup(root, manifest):

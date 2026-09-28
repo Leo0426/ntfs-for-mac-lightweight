@@ -1,10 +1,15 @@
 # NTFS 写入、删除与持久化验证闭环
 
-Status: in-progress / waiting-for-system-dialog
+Status: in-progress / image-passed-usb-awaiting-administrator
 Date: 2026-09-09
 Assignee: Codex
 
 ## 目标与现状
+
+最新结论：用户已重启，两个扩展最终已恢复 PlugInKit 可见性；一次性 NTFS 镜像的写删、
+标准卸载、重挂载独立读回和清理均已通过。USB 当前身份只读核对通过，但原始设备访问需要
+用户在终端完成管理员认证。临时 FSClient 工具的空结果不能证明全局缺失。
+以下阶段记录保留历史顺序，当前状态以末尾复测及 [诊断记录](FSKIT-DIAGNOSIS.md) 为准。
 
 用户要求在已授权的可牺牲 U 盘上验证真实写入、删除等操作，形成操作闭环。该授权已存在，
 无需再次确认是否允许删除测试盘数据。
@@ -112,3 +117,214 @@ macFUSE 的小块写入回归使 1–14 字节用例必须逐个运行，不能�
 FSKit/PluginKit 状态问题，但该历史说明不能证明本机的具体原因：
 [官方 5.2.0 发布说明](https://macfuse.github.io/2026/04/09/macfuse-5.2.0.html)。
 下一步先关闭待处理错误提示，确认进程退出，再判断是否需要用户重新登录或重启系统。
+
+## 继续开发与状态复核（2026-09-09）
+
+- 本次重新读取进程表，已无遗留 `ntfs-3g` 进程；两个等待提示的实验日志均已以挂载失败和
+  卸载日志结束。实际挂载表无实验镜像，USB 仍是原生 NTFS 只读挂载。原先的“进程静止未确认”
+  阻塞已解除，但这不能证明 FSKit 扩展启动问题已修复。
+- 尚未收到用户是否重新登录或重启的反馈；本次未重复发起已连续失败的挂载，也未进行 USB
+  写入、卸载或格式化。下一次实物尝试仍须重新核对当前目标、依赖及挂载事实。
+- 新增清单持久化与独立只读复验命令：规范 JSON + SHA-256、16 KiB 上限、独占创建和同步、
+  父目录/文件描述符核对、链接/特殊文件/非法字段/重复键/摘要与字节不一致拒绝；失败保留现场。
+  CLI 对清单加载和文件读回分别报告失败阶段，成功保持 `fileChecksPassed`，重挂载及 Windows
+  标志均为 false。接口及限制见 [工具说明](../../scripts/write-validation/README.md)。
+- 修复复验在读回期间新增未知条目时可能错误通过的问题，结束前重新核对完整目录清单。
+  新增行为已完成红、绿循环；当前 16 项自动化检查只使用系统临时目录，不能作为 NTFS 证据。
+- 交付验证：`scripts/check.sh` 退出 0，严格 Release、CoreChecks、Gate CLI、16 项实验测试、
+  只读 package/source 边界、本地 ad-hoc 签名包与五组负向 fixture 全部通过；`git diff --check`
+  通过。正式应用能力、生产依赖批准目录和 Gate 状态均未改变。
+
+## FSKit 注册诊断增量（2026-09-09）
+
+- 新只读 API 证据确认：系统查询成功，但两个 macFUSE 模块均缺失。PlugInKit 定向日志拒绝
+  “没有所属应用且非 SIP 保护”的插件；正式应用、扩展和库签名均有效。
+- 候选自带重新注册及原位置所属应用注册均退出 0，但没有恢复 FSKit 可见性。Mac 自安装
+  以来尚未重启，安装前启动的 `fskit_agent` 仍存活。下一步由用户保存工作后正常重启，再用
+  已固化的只读命令比较注册状态；重启恢复是待验证假设。
+- 新增独立 `InspectFSKit` 命令及注册判断测试；未知/超时、缺失、未启用、重复和路径不符均
+  失败关闭。`registeredAndEnabled` 只描述注册状态，始终不授予挂载或写入资格。
+- 本次没有镜像挂载或 USB 变更；具体观测、尝试、一手来源和恢复步骤见
+  [FSKit 诊断记录](FSKIT-DIAGNOSIS.md)。
+- 交付验证：`scripts/check.sh` 严格 Release、22 项隔离实验测试及全部既有检查通过；
+  本机只读诊断如实退出 1，报告 `standard/local=missing`。正式 App 和 Gate 状态保持原状。
+
+## 用户重启后的复测与诊断修正（2026-09-09）
+
+- 启动时间已更新到 2026-09-09 16:41:14 +08:00；原“等待重启”步骤已完成，但故障未恢复。
+  PlugInKit 在新启动会话仍以所属应用关联不被认可为由拒绝两个正式扩展。
+- 系统设置按“类别”显示两个扩展开启；分别关闭再开启、正常启动已公证的原应用并局部注册，
+  均未恢复 PlugInKit 可见性。用户 Applications 下的签名副本比较也未恢复，已注销并完整移除。
+- 本机 FSClient 查询日志报告调用方无 Team ID。修正诊断契约：`notObserved` 只表示当前进程
+  未观察到，增加 `observationScope=currentProcess`；肯定结果改为 `observedAndEnabled`。
+  旧 `missing` 输出不能作为系统全局缺失的证据，也不作为真实挂载必须通过的单独门槛。
+- 上游 #1192 存在同系统版本的相关症状，但其 PlugInKit 可见且只影响 local 模块，与本机不同；
+  #1194 推荐的按类别启用路径本机已验证。全用户 LaunchServices 重建没有得到可靠修复支持。
+- 本次未执行镜像挂载或 USB 变更；NTFS 文件语义、本机重挂载与 Windows 复核仍未通过。
+  后续查询已发现注册恢复，并实际完成镜像闭环，见下一节；原拟上游报告未发布。
+
+## 镜像闭环通过与 USB 执行入口（2026-09-09）
+
+- 最终 PlugInKit 查询已列出两个原位置模块及正确的 Parent Bundle；同时，ad-hoc FSClient
+  查询仍为空。修正可见范围后恢复镜像实验。不能确定重启、注册或其他操作中哪一步起作用。
+- 第二个 128 MiB 一次性 NTFS 镜像：34 项文件语义检查通过，包括 1–16 字节、Unicode、
+  覆盖、追加、重命名/替换、删除和 1 MiB 文件；标准卸载后重新挂载，独立进程核对
+  22 个保留文件与 6 个删除项。随后清理测试目录并标准卸载，实际挂载表确认无残留。
+  [镜像结果](IMAGE-RESULT.md) 是本机镜像证据；不表示 USB 或 Windows 已通过。
+- 新增固定目标的 `usb_lab.py`：私有目标回执摘要固定在代码中；只读预检在当前 U310 上通过。
+  不接受任意设备、挂载参数或恢复/格式化命令。实际 `--run` 在管理员权限检查前未做磁盘变更，
+  并如实报告 `administratorAuthenticationRequired`。不缓存、收集或回显管理员口令。
+- USB 执行顺序：fresh 身份/同盘卷核对 → 标准卸载原只读卷 → 原始 NTFS 启动扇区绑定及
+  no-recovery 健康检查 → FSKit 可写挂载 → 小目录写删/清理 → 4 GiB + 1 字节数据集 →
+  标准卸载/重挂载/独立读回 → 标准卸载。保留数据供 Windows 后续核对；不宣布整盘已推出。
+  原始启动扇区在初次卸载之前读取并绑定，每次操作再次核对；分区 UUID 不冒充 VolumeUUID。
+- 未知或矛盾事实均停止；变更命令超时继续等待实际退出并持有本实验租约，失败保留状态与证据。
+  此入口仍是 ADR 0009 的隔离实验，并非正式 helper、通用磁盘执行器或 Gate 资格。
+- USB 原始设备读取返回 Permission denied，非交互 sudo 要求密码。已完成可代办的目标核对、
+  代码及只读验证；下一步由用户在自己的终端运行 [工具说明](../../scripts/write-validation/README.md)
+  中的固定命令完成管理员认证。USB 写入、4 GiB 实物检查和 Windows 复核尚未执行。
+- 最终交付验证：`scripts/check.sh` 退出 0，35 项隔离实验测试、严格 Release、CoreChecks、
+  Gate CLI、只读边界、本地签名包及 5 组负向 fixture 全部通过；`git diff --check` 通过。
+  最新只读预检仍为 `targetMatched/currentlyWritable=false`，USB 仍是原生只读挂载，
+  无实验镜像挂载或 `ntfs-3g` 残留进程。管理员路径仍未执行。
+
+
+## 管理员入口的块设备判断修复（2026-09-10）
+
+- 用户实际运行 sudo 入口，报告 `blocked/notCharacterDevice`，且 `diskMutationsPerformed=false`。
+  失败发生在初始化读取启动扇区之前，未进入卸载、挂载或文件操作。
+- 本机只读核对确认：diskutil 给出的 `/dev/disk…` 为块设备，对应 `/dev/rdisk…` 为字符设备；
+  两者本机 `st_rdev` 相同。当前目标仍为 U310 及原 NTFS 分区，只读挂载未改变。
+  根因是实验脚本错误地对前者使用了 `S_ISCHR`，不是设备权限或 NTFS 健康检查失败。
+- 通过真实 `USBLab.read_boot` 调用路径的受控系统调用输入，先复现同一 `notCharacterDevice`，
+  再修正为严格块设备检查。保留 diskutil 路径和只读/no-follow 打开，不扩大为接受任意类型。
+  打开前、打开的描述符及读后路径必须具有相同设备号、inode 和类型，否则丢弃读回结果。
+- `--inspect` 复用类型检查并输出 `deviceNodeType=block`，本机已通过。新增 7 项回归检查覆盖
+  正常块设备、字符设备/链接/普通文件/FIFO 拒绝、打开和读回期间替换、非法 NTFS 扇区，以及
+  只读预检不打开设备的边界。自动化系统调用为受控输入，不冒充管理员实际设备读取。
+- 当前工具会话的非交互 sudo 仍要求密码，未绕过认证或修改设备权限；需要用户在原终端
+  重新运行同一固定目标命令。USB 实物写删、重挂载和 Windows 复核仍未通过。
+- 交付验证：`scripts/check.sh` 退出 0，42 项隔离实验测试、严格 Release、CoreChecks、Gate CLI、
+  只读边界、本地签名包及 5 组负向 fixture 全部通过；`git diff --check` 通过。当前挂载表仍为
+  USB 原生只读挂载，无 `ntfs-3g` 进程或实验挂载残留。
+
+## 管理员设备读取的错误定位（2026-09-10）
+
+- 用户第二次运行报告 `blocked/OSError` 和 `diskMutationsPerformed=false`。当前没有
+  `usb-run-…` 证据目录，USB 仍为原生只读挂载；原错误输出丢失 errno，不能确定失败调用。
+- 新增 `--probe-device`，复用实际启动扇区读取路径但不初始化实验、不创建租约或证据目录，
+  不进入卸载/挂载/文件操作。连续读回必须一致，前后目标与挂载表必须一致。
+- 读取路径分别记录节点检查、打开、描述符检查、扇区读取、读后检查及关闭阶段；启动入口
+  区分目标、依赖、管理员检查、租约及初始化阶段。系统调用错误附 `errno` / `errnoName`，
+  不泄露原始路径或异常正文。已请求用户运行只读诊断，真实错误码尚待采集。
+- 待验证假设：原生只读卷已挂载，块设备打开可能返回 `EBUSY`。
+  [Apple vfs_mountedon 文档](https://developer.apple.com/documentation/kernel/1523197-vfs_mountedon)
+  说明已挂载设备的忙状态；[Apple XNU spec_open 实现](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/miscfs/specfs/spec_vnops.c)
+  在块设备打开路径调用该检查。查阅日期为 2026-09-10；上游 main 源码不等于本机内核构建，
+  不能凭此替代本机 errno，也尚未据此更换设备读取方式。
+- 5 项新增回归检查覆盖打开/读取错误的阶段与 errno、初始化及租约失败不进入变更，以及
+  只读诊断不初始化实验或取得租约。`scripts/check.sh` 退出 0：47 项隔离实验测试、严格
+  Release 及全部既有检查通过；`git diff --check` 通过。USB 与 Windows 结果仍未通过。
+
+## 已挂载块设备 EBUSY 的修复（2026-09-10）
+
+- 用户执行只读诊断后得到 `operation=bootDeviceOpen`、`errno=16`、`errnoName=EBUSY`，
+  `diskMutationsPerformed=false`。这确认了上一节的已挂载块设备打开假设；尚未读到启动扇区，
+  也没有进入卸载、健康检查或写入阶段。
+- 再次核对固定 U310 身份、原生只读挂载和 512 字节逻辑扇区；系统两条节点分别为块设备和
+  原始字符设备，同一 `st_rdev` 与设备文件系统，各自具有不同 inode。
+- 系统调用边界测试复现真实读取路径的 `bootDeviceOpen/EBUSY`，再修改为从严格派生并配对
+  的原始字符设备读取。块设备继续作为 diskutil、驱动和实际挂载表的目标；没有改挂载参数。
+  两节点类型、设备号、设备文件系统及前后路径/描述符身份全部核对，原始设备只以
+  `O_RDONLY | O_NOFOLLOW | O_NONBLOCK` 打开，只读 512 字节，不接受任意输入路径。
+- 3 项新增回归检查覆盖已挂载块设备下的原始读取、原始节点类型/设备不匹配及非法派生路径；
+  原有替换检查扩展为分别替换块节点和原始节点。50 项隔离实验测试通过。
+- 工具会话的 `sudo -n` 仍要求认证；已请求用户在原终端重复只读诊断。管理员原始设备读取、
+  USB 实物闭环和 Windows 复核仍待验证，不能把受控系统调用测试作为实物通过证据。
+- 一手依据沿用上一节的 Apple XNU `spec_open`；查阅日期 2026-09-10。本机实际 errno 现已
+  与块设备分支吻合；原始设备分支的本机读取结果仍需上述只读命令确认。
+- 最终检查：`scripts/check.sh` 退出 0，50 项隔离实验测试、严格 Release、CoreChecks、
+  Gate CLI、只读边界、本地签名包及 5 组负向 fixture 全部通过；`git diff --check` 通过。
+  最新 `--inspect` 为 `targetMatched/currentlyWritable=false`。
+
+## 管理员原始设备读取通过（2026-09-10 00:57 +08:00）
+
+- 通过当前任务的只读终端接口取得完整后续输出；用户粘贴的 `Password:` 后实际已经返回：
+  `{"bootBytes":512,"diskMutationsPerformed":false,"stage":"deviceReadVerified"}`。
+  终端回到 shell 提示，系统没有 sudo/Python 诊断进程残留。命令前的 `exit:1` 属于上一轮失败。
+- 该输出由真实管理员 `--probe-device` 产生，确认了两次 512 字节 NTFS 启动扇区读取一致、
+  节点身份核对和前后目标/挂载事实检查通过；本轮没有磁盘变更。此结果解决设备读取阻塞，
+  不能替代完整 USB 写入、重挂载持久化或 Windows 验证。
+- 再次执行 `--inspect`，固定 U310 仍为 `targetMatched/currentlyWritable=false`。下一步为
+  同一固定目标的管理员 `--run`，执行已授权的完整实验；代码仍为前述 50 项测试与严格
+  Release 已通过版本。本次仅更新真实验证记录，`git diff --check` 通过。
+
+## 系统弹窗启动路径被拒绝（2026-09-10）
+
+- 为执行完整 USB 实验，尝试用 macOS `do shell script … with administrator privileges`
+  启动同一个固定脚本；用户明确要求重试并随后确认已授权。两次调用都已结束，输出均为
+  `stage=blocked/operation=bootDeviceOpen/errno=1/errnoName=EPERM`，且
+  `diskMutationsPerformed=false`。代码路径说明管理员权限检查已通过，拒绝发生在设备打开时，
+  不能再描述为仍等待管理员认证，也不能归因于未输入正确密码。
+- 两次失败均未生成 `usb-run-…` 目录，系统没有实验 Python 或 NTFS-3G 进程；固定 U310
+  的最新 `--inspect` 仍为 `targetMatched/currentlyWritable=false`。没有卸载或文件写入。
+- 该启动环境与 00:57 原终端 `sudo --probe-device` 的已验证结果不同，具体系统访问拒绝原因
+  尚未确定。停止重复弹窗路径，回到原终端运行固定 `sudo … usb_lab.py --run`；不改变设备
+  权限、系统安全设置或实验目标。完整 USB 闭环与 Windows 复核仍未通过。
+- 定向系统日志进一步记录两次 Python 责任进程均为 `auid=0/euid=0`；第一次出现后台会话
+  `SystemPolicyAllFiles` 的 `record_denial`，第二次同类预检 `authValue=0`，并有
+  `SystemPolicyRemovableVolumes` 请求转发。日志中的直接访问者为其 diskutil 子进程，
+  尚未把这条 TCC 记录与原始设备 `open` 的 EPERM 一一关联，故仅作为启动环境差异线索，
+  不据此扩大系统权限。定向日志保存在被忽略的 `.build/write-validation/usb-authorization-*.log`。
+
+## 原终端完整 USB 运行失败（2026-09-10 16:02 +08:00）
+
+- 用户启动固定 sudo 全流程，已通过管理员设备读取并完成 `nativeUnmountVerified`；
+  首次可写挂载时 `mountProcessExited`。卷外证据为
+  `.build/write-validation/usb-run-eeqo4enw/`，不是此前零磁盘变更的初始化拒绝。
+- 驱动日志与系统日志一致指向 `macfuse-local` 扩展未找到。当前 U310 身份仍匹配，数据卷
+  保持卸载，驱动已经退出；无 `writableMountVerified` 或文件检查证据。
+  写删、4 GiB + 1 字节文件、USB 重挂载读回及 Windows 均未通过。驱动尝试挂载期间可能
+  已触及 NTFS 元数据，不能声称磁盘字节未变。正式 App 和 Gate 状态不变。
+- 用户的两次后续重试都因缺少初始原生只读挂载而拒绝，没有新建运行目录。保留失败现场，
+  不移除初始挂载约束或盲目重试。当前登录用户仍能枚举两个正式扩展，正在核对管理员
+  用户范围差异；没有用 FSClient 空集合断言系统模块不存在。
+- 详细诊断、来源和未验证项见 [FSKit 诊断记录](FSKIT-DIAGNOSIS.md)。
+- 后续一次性镜像 local 对照确认当前用户的扩展能够启动并形成 local 挂载；但请求的只读
+  标志未被系统事实确认，对照中止。标准卸载返回 I/O 错误，普通 diskutil 卸载也失败，
+  留有该镜像的挂载表残留；相关测试和卸载进程已退出。暂停新的磁盘操作，保留证据，
+  不将此对照计为通过。用户随后返回管理员 PlugInKit 输出，已确认其能看到与当前用户
+  相同 UUID、路径及 Parent Bundle 的 local 模块；root 未注册假设被否定，FSKit 运行时
+  可见性和启用状态仍不能由注册结果推断。
+- 本轮仅修改实验记录与入口说明，没有更换固定依赖或修改运行代码；`git diff --check`
+  通过。上一代码版本的 50 项实验测试、严格 Release 和仓库检查结果仍见前节，未重复运行。
+- 当前只读复查仍有镜像残留，U310 未挂载；未新增磁盘操作。已保存含启动时间的现场快照，
+  下一步由用户正常重启清理残留，再核对挂载与进程状态后继续定位。重启仅用于恢复干净
+  实验环境，不能作为 USB 写入故障已修复或可以直接重跑 `--run` 的证据。
+
+## 重启后镜像挂载对照与异常收尾修复（2026-09-10）
+
+- 已确认 21:30:55 的新启动时间，旧镜像残留消失，U310 身份和原生只读挂载通过核对。
+- 新独立镜像对照入口固定候选、种子内容及 local FSKit 参数，只操作新建的镜像副本；
+  不卸载或写入物理 USB。以异常检查路径为红测试，修复先丢失驱动、后无法卸载的问题。
+  正常卸载之前保留驱动，失败等待实际退出，不发送强制退出或强制卸载。
+- 当前用户 uid 501 的实际挂载/标准卸载/驱动退出/卸载后健康查询均通过，U310 与挂载表
+  前后不变，没有残留。管理员同参数镜像对照已执行，仍报扩展未找到并退出；USB 文件
+  写删、4 GiB + 1 字节文件和重挂载读回尚未完成。
+- `scripts/check.sh` 退出 0，56 项实验测试、严格 Release 和全部仓库检查通过。证据及
+  完整边界见 [FSKit 诊断](FSKIT-DIAGNOSIS.md) 与工具 README。
+
+## 永久降权候选验证（2026-09-10）
+
+- 固定 NTFS-3G 的独立补丁构建在打开存储后、进入 FUSE 前永久降至当前用户；原候选和
+  系统安装不变。身份降权测试、镜像生命周期测试及普通用户真实镜像对照已通过。
+- 下一步由原终端执行 `mount_context_probe.py --run --user-mount-candidate` 的 sudo 对照。
+  管理员路径通过前不切换 USB 协调器；通过后仍需独立验证物理设备、写删、大文件及读回。
+- 当前 60 项隔离实验测试、严格 Release 和全部仓库检查通过；候选普通用户实际对照
+  证据位于 `.build/write-validation/context-probe-_xs2xuzt/`。
+- 管理员 v1 在组列表校验退出、无残留。已修复 Darwin 扩展 `getgroups` 与进程组列表
+  混淆，v2 普通用户真实对照和 61 项测试、严格 Release、全部仓库检查通过。管理员 v2
+  同入口对照待返回；实际候选摘要和测试来源见诊断记录。
+- 管理员 v2 对照 `context-probe-e5vd5b8g/` 已通过，现场无残留，U310 原生只读。独立 USB
+  协调器接入同一固定驱动和用户文件操作身份，保留严格物理 source 核对与失败保留边界；
+  下一步在已授权 U310 上完成实际闭环，Windows 仍后置且未验证。

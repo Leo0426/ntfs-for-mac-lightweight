@@ -11,6 +11,23 @@ from file_cycle import ValidationError, prepare, verify, cleanup
 
 
 class FileCycleChecks(unittest.TestCase):
+    def test_entries_added_during_readback_cannot_report_an_exact_inventory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            manifest = prepare(root)
+            workspace = root / manifest['directory']
+            original_read = os.read
+            inserted = False
+            def read(descriptor, size):
+                nonlocal inserted
+                if not inserted:
+                    (workspace / 'arrived-during-read.txt').write_bytes(b'preserve')
+                    inserted = True
+                return original_read(descriptor, size)
+            with patch('os.read', side_effect=read), self.assertRaises(ValidationError):
+                verify(root, manifest)
+            self.assertEqual((workspace / 'arrived-during-read.txt').read_bytes(), b'preserve')
+
     def test_file_operations_survive_independent_readback_and_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
