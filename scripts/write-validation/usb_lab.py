@@ -173,6 +173,23 @@ def dependencies():
                 'dependencySignerChanged')
 
 
+def run_preflight():
+    # Everything --run needs before its first disk mutation that is checkable without
+    # root: the pinned v2 driver and the file-check identity switch.
+    candidate()
+    with filesystem_identity():
+        pass
+
+
+def record(lab, stage, **values):
+    # A failure must reach the terminal even if the evidence directory is unwritable.
+    try:
+        lab.journal(stage, **values)
+    except BaseException as error:
+        emit(stage, **values, evidenceDirectory=str(lab.folder), journalRecorded=False,
+             journalError=failure_details(error, 'journalWrite'))
+
+
 def wait_for_mutation(process):
     try:
         return process.wait(timeout=30)
@@ -204,9 +221,7 @@ def defer_interrupts():
 
 class USBLab:
     def __init__(self, expected):
-        candidate()
-        with filesystem_identity():
-            pass
+        run_preflight()
         require(not any('(macfuse,' in line or 'NTFSLite' in line for line in mounts()),
                 'existingExperimentMount')
         existing = subprocess.run(['/usr/bin/pgrep', '-x', 'ntfs-3g'], capture_output=True, timeout=10)
@@ -447,7 +462,7 @@ def probe_device(expected, facts):
 def main():
     parser = argparse.ArgumentParser(description='固定目标的独立 USB 实验；成功后保留 Windows 复核数据并保持卷卸载。')
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument('--inspect', action='store_true', help='只读核对目标，不访问原始设备或执行磁盘变更')
+    mode.add_argument('--inspect', action='store_true', help='只读核对目标、依赖及当前驱动候选，不访问原始设备或执行磁盘变更')
     mode.add_argument('--probe-device', action='store_true', help='只读设备诊断：读取并核对启动扇区，不卸载或写入')
     mode.add_argument('--run', action='store_true', help='需要 sudo；执行已授权目标的写删与重挂载闭环')
     args = parser.parse_args()
@@ -462,10 +477,12 @@ def main():
         block_device_info(facts['node'])
         operation = 'dependencyCheck'
         dependencies()
+        operation = 'candidateCheck'
+        run_preflight()
         if args.inspect:
             emit('targetMatched', media=expected['mediaName'], physicalBytes=expected['physicalBytes'],
                  partitionBytes=expected['partitionBytes'], currentlyWritable=facts['writable'],
-                 deviceNodeType='block',
+                 deviceNodeType='block', mountCandidateVerified=True, driverSHA256=DRIVER_SHA256,
                  administratorRequired=os.geteuid() != 0, diskMutationsPerformed=False)
             return 0
         operation = 'administratorCheck'
@@ -498,8 +515,10 @@ def main():
         if lab is not None:
             signal.signal(signal.SIGINT, signal.SIG_IGN)
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            # Record the original failure first: the stop below may wait indefinitely on a driver.
+            record(lab, 'failed', **details, windowsVerified=False, inspectResidualMountState=True)
             lab.stop_after_failure()
-            lab.journal('failed', **details, windowsVerified=False, inspectResidualMountState=True)
+            record(lab, 'failureHandlingFinished', windowsVerified=False, inspectResidualMountState=True)
         else:
             emit('blocked', **details, diskMutationsPerformed=False)
         return 1

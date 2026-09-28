@@ -65,7 +65,8 @@ class USBDeviceChecks(unittest.TestCase):
                 with patch('usb_lab.sys.argv', ['usb_lab.py', '--inspect']), \
                      patch('usb_lab.private_target', return_value=expected), \
                      patch('usb_lab.stable_snapshot', return_value={'node': self.lab.node, 'writable': False}), \
-                     patch('usb_lab.dependencies'), patch('usb_lab.sys.stdout', output):
+                     patch('usb_lab.dependencies'), patch('usb_lab.run_preflight'), \
+                     patch('usb_lab.sys.stdout', output):
                     self.assertEqual(main(), code)
                 report = json.loads(output.getvalue())
                 self.assertFalse(report['diskMutationsPerformed'])

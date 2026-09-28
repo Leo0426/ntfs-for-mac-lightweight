@@ -106,7 +106,7 @@ swiftc -O -warnings-as-errors -parse-as-library \
 回归测试。当前入口固定 v2；普通用户和管理员启动对照均已通过。以下保留镜像诊断入口：
 
 ```sh
-sudo /opt/homebrew/bin/python3 -I -S /Users/leolu/Projects/personal_projects/ntfs-for-mac-lightweight/scripts/write-validation/mount_context_probe.py --run --user-mount-candidate
+sudo /opt/homebrew/bin/python3 -I -S scripts/write-validation/mount_context_probe.py --run --user-mount-candidate
 ```
 
 该入口只使用已固定 SHA-256 的 128 MiB 实验镜像种子，每次独占创建新副本；不以可写方式
@@ -145,6 +145,11 @@ BSD 编号可以在启动新一轮前变化，单轮运行中变化立即停止�
 python3 -I -S scripts/write-validation/usb_lab.py --inspect
 ```
 
+在仓库根目录运行。`targetMatched` 现在还要求 `--run` 实际使用的 v2 驱动候选摘要、属主和
+文件检查身份切换通过（`mountCandidateVerified=true`）；任一失败报告 `operation=candidateCheck`。
+`--run` 在取得租约和卸载原生卷之前执行同一预检。管理员设备读取、FSKit 挂载与文件写删仍只能
+由完整运行证明，`targetMatched` 不等于运行资格。
+
 本机已实际得到 `targetMatched` 和 `deviceNodeType=block`；预检同时检查 diskutil 返回的
 `/dev/disk…` 是块设备，拒绝字符设备、链接及其他文件类型。该节点继续用于挂载及来源核对；
 启动扇区从对应的 `/dev/rdisk…` 原始字符设备只读获取。读取前核对两节点的规定类型、相同
@@ -167,7 +172,6 @@ sudo /opt/homebrew/bin/python3 -I -S scripts/write-validation/usb_lab.py --probe
 永久降权候选的管理员镜像对照通过。当前 USB 入口固定使用同一候选并再次核对实际目标：
 
 ```sh
-cd /Users/leolu/Projects/personal_projects/ntfs-for-mac-lightweight
 sudo /opt/homebrew/bin/python3 -I -S scripts/write-validation/usb_lab.py --run
 ```
 
@@ -196,7 +200,8 @@ uid 501，独立读回和标准卸载子进程也使用该身份；不允许跨�
 - 变更命令超时仍等待真实退出，并持有本实验进程之间的独占锁；不会因超时释放锁、强制
   卸载或强制结束驱动。若显示 `quiescencePending`，保持窗口开启并处理已有系统提示。
 - 任何失败保留文件与实际状态，不继续复验、清理或输出成功；失败后需要复核残留挂载状态，
-  不直接重复运行。成功后卷保持卸载，但本脚本不推出整盘，也不声明可以拔出。
+  不直接重复运行。原始失败原因在收尾等待驱动之前先写入 `failed` 记录并输出；收尾返回后另记
+  `failureHandlingFinished`。证据目录不可写时仍在终端输出 `failed` 并标记 `journalRecorded=false`。成功后卷保持卸载，但本脚本不推出整盘，也不声明可以拔出。
 - 用户首次运行在设备类型检查处误拒绝；2026-09-10 修正后第二次运行报告 `blocked/OSError`，
   两次均未执行磁盘变更。新增只读诊断已采集到 `bootDeviceOpen/EBUSY`，确认已挂载块设备
   不能按原方式打开。改为严格配对的原始设备只读读取后，2026-09-10 00:57 管理员复测返回

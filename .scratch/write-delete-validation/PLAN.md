@@ -1,6 +1,6 @@
 # NTFS 写入、删除与持久化验证闭环
 
-Status: in-progress / image-passed-usb-awaiting-administrator
+Status: in-progress / image-passed-usb-awaiting-v2-run（最新状态见末节）
 Date: 2026-09-09
 Assignee: Codex
 
@@ -328,3 +328,17 @@ FSKit/PluginKit 状态问题，但该历史说明不能证明本机的具体原�
 - 管理员 v2 对照 `context-probe-e5vd5b8g/` 已通过，现场无残留，U310 原生只读。独立 USB
   协调器接入同一固定驱动和用户文件操作身份，保留严格物理 source 核对与失败保留边界；
   下一步在已授权 U310 上完成实际闭环，Windows 仍后置且未验证。
+
+## 审计 P2 修复：失败即时落证与运行候选预检（2026-09-28）
+
+- 失败路径先写 `failed`（原始阶段、原因）再进入可能长时间等待驱动的收尾；收尾返回后另记
+  `failureHandlingFinished`。证据目录不可写时终端仍输出 `failed` 并标 `journalRecorded=false`。
+- `--inspect` 与 `--run` 共用 `run_preflight()`：v2 驱动候选摘要/属主与文件检查身份切换。
+  失败报告 `operation=candidateCheck`；`--run` 在租约与原生卸载前即拒绝。`targetMatched`
+  新增 `mountCandidateVerified=true`，仍不代表管理员设备读取、FSKit 挂载或写删资格。
+- 6 项新增回归先红后绿；`scripts/check.sh` 退出 0（68 项实验测试、严格 Release、只读边界、
+  本地签名包与负向 fixture）；`git diff --check` 通过。
+- 本机账户目录已由 `/Users/leolu` 变为 `/Users/heyonepiece`，uid 仍为 501，与固定
+  `MOUNT_UID` 一致；工具说明中的绝对路径改为仓库相对命令。历史记录中的旧路径保持原样。
+- 同日只读 `--inspect` 返回 `blocked/targetQuery/targetAbsentOrAmbiguous`，无磁盘变更。
+  下一步由用户连接原 U310 并回传 `--inspect`；USB 闭环与 Windows 复核仍未通过。
