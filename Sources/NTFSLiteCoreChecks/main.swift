@@ -4,6 +4,7 @@ import Foundation
 import NTFSLiteCore
 import NTFSLiteDiagnostics
 import NTFSLiteGateEvidence
+import NTFSLiteHelperExecution
 import NTFSLiteHelperProtocol
 import NTFSLiteMutationPreparation
 import NTFSLitePresentation
@@ -16283,3 +16284,261 @@ func helperServiceRequirementsPinTeamAndIdentifiers() {
 
 helperServiceRequirementsPinTeamAndIdentifiers()
 print("PASS: helper XPC code-signing requirements pin the team and both identifiers")
+
+final class FakeWritableMountSystem: WritableMountSystem, @unchecked Sendable {
+    var facts: [String: HelperVolumeFacts]
+    var bootSectors: [Data]
+    var healthClean: Bool? = true
+    var mount: HelperMountEntry?
+    var mountAppearsAfterStart = true
+    var placeholder = true
+    var driver = HelperDriverState(isAlive: true, uid: 501, gid: 20)
+    var holdsDevice = true
+    var writable = true
+    var calls: [String] = []
+
+    init() {
+        facts = ["disk6s2": HelperVolumeFacts(
+            bsdName: "disk6s2", wholeDiskBSDName: "disk6", isWholeDisk: false, isInternal: false,
+            isRemovable: true, isEjectable: true, deviceProtocol: "USB", fileSystemName: "ntfs",
+            mountPoint: "/Volumes/NTFSLAB", isWritableMount: false,
+            volumeUUID: "11111111-2222-3333-4444-555555555555"
+        )]
+        var boot = Data(repeating: 0, count: 512)
+        boot.replaceSubrange(3..<11, with: Data("NTFS    ".utf8))
+        boot[72] = 9
+        boot[510] = 0x55
+        boot[511] = 0xAA
+        bootSectors = [boot, boot]
+    }
+
+    func volumeFacts(bsdName: String) async -> HelperVolumeFacts? { calls.append("facts"); return facts[bsdName] }
+    func readBootSector(partitionBSDName: String) async -> Data? {
+        calls.append("boot")
+        return bootSectors.isEmpty ? nil : bootSectors.removeFirst()
+    }
+    func unmountNative(bsdName: String) async -> Bool {
+        calls.append("unmount")
+        if let current = facts[bsdName] {
+            facts[bsdName] = HelperVolumeFacts(
+                bsdName: current.bsdName, wholeDiskBSDName: current.wholeDiskBSDName,
+                isWholeDisk: current.isWholeDisk, isInternal: current.isInternal,
+                isRemovable: current.isRemovable, isEjectable: current.isEjectable,
+                deviceProtocol: current.deviceProtocol, fileSystemName: current.fileSystemName,
+                mountPoint: nil, isWritableMount: nil, volumeUUID: nil
+            )
+        }
+        return true
+    }
+    func healthIsClean(bsdName: String) async -> Bool? { calls.append("health"); return healthClean }
+    func freshMountPoint() -> String { "/Volumes/NTFSLite-fixture" }
+    func startDriver(bsdName: String, mountPoint: String) async -> Int32? {
+        calls.append("start")
+        if mountAppearsAfterStart {
+            mount = mount ?? HelperMountEntry(source: "/dev/disk9", mountPoint: mountPoint,
+                                              flags: ["macfuse", "local", "nodev", "nosuid", "fskit"])
+        }
+        return 4242
+    }
+    func mountEntry(at mountPoint: String) async -> HelperMountEntry? { mount?.mountPoint == mountPoint ? mount : nil }
+    func isFSKitPlaceholder(source: String) async -> Bool { placeholder }
+    func driverState(pid: Int32) async -> HelperDriverState { driver }
+    func driverHolds(pid: Int32, devicePath: String) async -> Bool { holdsDevice && devicePath == "/dev/disk6s2" }
+    func isWritable(mountPoint: String) async -> Bool { writable }
+    func pause() async {}
+}
+
+func writableMountTarget(uuid: String = "11111111-2222-3333-4444-555555555555", volume: String = "disk6s2",
+                         disk: String = "disk6") -> HelperVolumeInstanceIdentity {
+    try! HelperVolumeInstanceIdentity(
+        volumeUUID: uuid, volumeBSDName: volume,
+        disk: HelperDiskInstanceIdentity(physicalDiskBSDName: disk, mediaGeneration: 1)
+    )
+}
+
+func writableMountExecutorVerifiesBeforeAndAfterMutation() async {
+    let happy = FakeWritableMountSystem()
+    let success = await WritableMountExecutor.run(target: writableMountTarget(), system: happy)
+    expect(success == HelperResponseEnvelope(resultCode: .succeeded, exitStatus: 0)
+           && happy.calls.starts(with: ["facts", "boot", "unmount", "facts", "boot", "health", "start"]),
+           "a verified external NTFS data volume must be bound, unmounted, health-checked and mounted in order")
+
+    func refused(_ configure: (FakeWritableMountSystem) -> Void, target: HelperVolumeInstanceIdentity = writableMountTarget(),
+                 _ expected: WritableMountFailure, _ message: String) async {
+        let system = FakeWritableMountSystem()
+        configure(system)
+        let result = await WritableMountExecutor.run(target: target, system: system)
+        expect(result == HelperResponseEnvelope(resultCode: .executionFailed, exitStatus: expected.rawValue)
+               && !system.calls.contains("unmount"), message)
+    }
+    func change(_ system: FakeWritableMountSystem, _ edit: (inout HelperVolumeFacts) -> Void) {
+        var value = system.facts["disk6s2"]!
+        edit(&value)
+        system.facts["disk6s2"] = value
+    }
+    await refused({ change($0) { $0.isInternal = true } }, .notExternalRemovable,
+                  "an internal disk must be refused before any mutation")
+    await refused({ change($0) { $0.deviceProtocol = "Disk Image" } }, .notExternalRemovable,
+                  "a virtual disk image must be refused before any mutation")
+    await refused({ change($0) { $0.fileSystemName = "exfat" } }, .notNTFS,
+                  "a non-NTFS volume must be refused before any mutation")
+    await refused({ _ in }, target: writableMountTarget(uuid: "99999999-2222-3333-4444-555555555555"), .volumeUUIDMismatch,
+                  "a different volume identity must be refused before any mutation")
+    await refused({ _ in }, target: writableMountTarget(volume: "disk7s2", disk: "disk7"), .factsUnavailable,
+                  "a request for a volume that is not present must be refused")
+    await refused({ change($0) { $0.wholeDiskBSDName = "disk7" } }, .targetMismatch,
+                  "a partition that moved to another whole disk must be refused")
+    await refused({ change($0) { $0.isWritableMount = true } }, .notNativeReadOnly,
+                  "an already writable volume must not be remounted")
+    await refused({ $0.bootSectors = [Data(repeating: 0, count: 512)] }, .bootSectorInvalid,
+                  "an unreadable or non-NTFS boot sector must be refused before unmounting")
+
+    func afterUnmount(_ configure: (FakeWritableMountSystem) -> Void, _ expected: WritableMountFailure,
+                      started: Bool, _ message: String) async {
+        let system = FakeWritableMountSystem()
+        configure(system)
+        let result = await WritableMountExecutor.run(target: writableMountTarget(), system: system)
+        expect(result == HelperResponseEnvelope(resultCode: .postconditionFailed, exitStatus: expected.rawValue)
+               && system.calls.contains("unmount") && system.calls.contains("start") == started, message)
+    }
+    await afterUnmount({ $0.bootSectors[1][72] = 8 }, .bootSectorChanged, started: false,
+                       "different media after unmount must stop before the health check and driver")
+    await afterUnmount({ $0.healthClean = false }, .healthNotClean, started: false,
+                       "a dirty or hibernated volume must never be mounted writable")
+    await afterUnmount({ $0.healthClean = nil }, .healthNotClean, started: false,
+                       "an unknown health result must fail closed")
+    await afterUnmount({ $0.mountAppearsAfterStart = false }, .mountNotObserved, started: true,
+                       "a mount that never appears must be reported without claiming success")
+    await afterUnmount({ $0.placeholder = false }, .mountNotVerified, started: true,
+                       "a mount source that is not the FSKit placeholder must not be trusted")
+    await afterUnmount({ $0.holdsDevice = false }, .mountNotVerified, started: true,
+                       "the driver must be proven to hold the target partition")
+    await afterUnmount({ $0.driver = HelperDriverState(isAlive: true, uid: 0, gid: 0) }, .mountNotVerified, started: true,
+                       "a driver that did not drop to the mount user must not be trusted")
+    await afterUnmount({ $0.writable = false }, .mountNotVerified, started: true,
+                       "a read-only result must not be reported as writable")
+    await afterUnmount({ s in s.mount = HelperMountEntry(source: "/dev/disk9", mountPoint: "/Volumes/NTFSLite-fixture",
+                                                         flags: ["macfuse", "local", "fskit", "read-only"]) },
+                       .mountNotVerified, started: true, "a read-only or missing nodev/nosuid mount must be refused")
+}
+
+await writableMountExecutorVerifiesBeforeAndAfterMutation()
+print("PASS: helper writable mount binds identity, checks health and verifies the FSKit mount, failing closed")
+
+final class FakeDiskReleaseSystem: DiskReleaseSystem, @unchecked Sendable {
+    var volume = HelperVolumeFacts(
+        bsdName: "disk6s2", wholeDiskBSDName: "disk6", isWholeDisk: false, isInternal: false,
+        isRemovable: true, isEjectable: true, deviceProtocol: "USB", fileSystemName: "ntfs",
+        mountPoint: nil, isWritableMount: nil, volumeUUID: nil
+    )
+    var disk = HelperVolumeFacts(
+        bsdName: "disk6", wholeDiskBSDName: "disk6", isWholeDisk: true, isInternal: false,
+        isRemovable: true, isEjectable: true, deviceProtocol: "USB", fileSystemName: nil,
+        mountPoint: nil, isWritableMount: nil, volumeUUID: nil
+    )
+    var owned: [HelperOwnedMount] = [HelperOwnedMount(mountPoint: "/Volumes/NTFSLite-a", driverPID: 4242)]
+    var unmountSucceeds = true
+    var driverExits = true
+    var ejectSucceeds = true
+    var diskRemains = false
+    var calls: [String] = []
+
+    func volumeFacts(bsdName: String) async -> HelperVolumeFacts? {
+        switch bsdName {
+        case "disk6": disk
+        case "disk6s2": volume
+        case "disk6s1": HelperVolumeFacts(
+            bsdName: "disk6s1", wholeDiskBSDName: "disk6", isWholeDisk: false, isInternal: false,
+            isRemovable: true, isEjectable: true, deviceProtocol: "USB", fileSystemName: "msdos",
+            mountPoint: nil, isWritableMount: nil, volumeUUID: nil)
+        default: nil
+        }
+    }
+    func partitions(ofDisk bsdName: String) async -> [String]? { bsdName == "disk6" ? ["disk6s1", "disk6s2"] : nil }
+    func ownedFSKitMounts(devicePath: String) async -> [HelperOwnedMount]? {
+        devicePath == "/dev/disk6s2" ? owned : []
+    }
+    func unmountFileSystem(mountPoint: String) async -> Bool {
+        calls.append("unmount:" + mountPoint)
+        if unmountSucceeds { owned.removeAll { $0.mountPoint == mountPoint } }
+        return unmountSucceeds
+    }
+    func waitForDriverExit(pid: Int32) async -> Bool { calls.append("wait"); return driverExits }
+    func removeEmptyMountPoint(_ path: String) async -> Bool { calls.append("rmdir"); return true }
+    func unmountNativeVolume(bsdName: String) async -> Bool {
+        calls.append("nativeUnmount:" + bsdName)
+        volume.mountPoint = nil
+        return true
+    }
+    func eject(diskBSDName: String) async -> Bool { calls.append("eject"); return ejectSucceeds }
+    func diskIsPresent(bsdName: String) async -> Bool { diskRemains }
+    func pause() async {}
+}
+
+func diskReleaseExecutorUsesOnlyStandardReleaseAndFailsClosed() async {
+    let disk = try! HelperDiskInstanceIdentity(physicalDiskBSDName: "disk6", mediaGeneration: 1)
+    let volume = writableMountTarget()
+    let ok = HelperResponseEnvelope(resultCode: .succeeded, exitStatus: 0)
+
+    let fskit = FakeDiskReleaseSystem()
+    let fskitResult = await DiskReleaseExecutor.unmountVolume(target: volume, system: fskit)
+    expect(fskitResult == ok
+           && fskit.calls == ["unmount:/Volumes/NTFSLite-a", "wait", "rmdir"],
+           "the helper's own FSKit mount must be unmounted normally, its driver awaited and the mountpoint removed")
+
+    let native = FakeDiskReleaseSystem()
+    native.owned = []
+    native.volume.mountPoint = "/Volumes/NTFSLAB"
+    let nativeResult = await DiskReleaseExecutor.unmountVolume(target: volume, system: native)
+    expect(nativeResult == ok
+           && native.calls == ["nativeUnmount:disk6s2"],
+           "a native mount is released through the standard Disk Arbitration unmount")
+
+    func check(_ configure: (FakeDiskReleaseSystem) -> Void, _ run: (FakeDiskReleaseSystem) async -> HelperResponseEnvelope,
+               _ expected: HelperResponseEnvelope, _ message: String) async {
+        let system = FakeDiskReleaseSystem()
+        configure(system)
+        let result = await run(system)
+        expect(result == expected, message)
+    }
+    func failed(_ f: DiskReleaseFailure) -> HelperResponseEnvelope { HelperResponseEnvelope(resultCode: .executionFailed, exitStatus: f.rawValue) }
+    func changed(_ f: DiskReleaseFailure) -> HelperResponseEnvelope { HelperResponseEnvelope(resultCode: .postconditionFailed, exitStatus: f.rawValue) }
+
+    await check({ $0.volume.isInternal = true }, { await DiskReleaseExecutor.unmountVolume(target: volume, system: $0) },
+                failed(.notExternalRemovable), "an internal volume must not be touched")
+    await check({ $0.volume.wholeDiskBSDName = "disk7" }, { await DiskReleaseExecutor.unmountVolume(target: volume, system: $0) },
+                failed(.targetMismatch), "a volume on another disk must not be touched")
+    await check({ $0.owned.append(HelperOwnedMount(mountPoint: "/Volumes/NTFSLite-b", driverPID: 4343)) },
+                { await DiskReleaseExecutor.unmountVolume(target: volume, system: $0) },
+                failed(.ambiguousMount), "two mounts for one partition must stop instead of guessing")
+    await check({ $0.unmountSucceeds = false }, { await DiskReleaseExecutor.unmountVolume(target: volume, system: $0) },
+                failed(.unmountRefused), "a busy volume must be reported, never forced")
+    await check({ $0.driverExits = false }, { await DiskReleaseExecutor.unmountVolume(target: volume, system: $0) },
+                changed(.driverNotExited), "a driver that has not exited must be reported without termination")
+
+    let whole = FakeDiskReleaseSystem()
+    let wholeResult = await DiskReleaseExecutor.unmountDisk(target: disk, system: whole)
+    expect(wholeResult == ok
+           && whole.calls.contains("unmount:/Volumes/NTFSLite-a"),
+           "unmounting a disk must release the helper's FSKit mounts on its partitions")
+
+    let eject = FakeDiskReleaseSystem()
+    eject.owned = []
+    let ejectResult = await DiskReleaseExecutor.ejectDisk(target: disk, system: eject)
+    expect(ejectResult == ok && eject.calls == ["eject"],
+           "an unmounted external disk is ejected with the standard request")
+    await check({ _ in }, { await DiskReleaseExecutor.ejectDisk(target: disk, system: $0) },
+                failed(.stillMounted), "a disk with a mounted partition must not be ejected")
+    await check({ $0.owned = []; $0.volume.mountPoint = "/Volumes/NTFSLAB" },
+                { await DiskReleaseExecutor.ejectDisk(target: disk, system: $0) },
+                failed(.stillMounted), "a native mount also blocks eject")
+    await check({ $0.owned = []; $0.ejectSucceeds = false }, { await DiskReleaseExecutor.ejectDisk(target: disk, system: $0) },
+                failed(.ejectRefused), "a refused eject is reported without forcing")
+    await check({ $0.owned = []; $0.diskRemains = true }, { await DiskReleaseExecutor.ejectDisk(target: disk, system: $0) },
+                changed(.ejectNotConfirmed), "eject success requires the disk to disappear from fresh facts")
+    await check({ $0.disk.deviceProtocol = "Disk Image" }, { await DiskReleaseExecutor.ejectDisk(target: disk, system: $0) },
+                failed(.notExternalRemovable), "a virtual disk is outside the helper scope")
+}
+
+await diskReleaseExecutorUsesOnlyStandardReleaseAndFailsClosed()
+print("PASS: helper unmount and eject use standard release only, await drivers and confirm removal")

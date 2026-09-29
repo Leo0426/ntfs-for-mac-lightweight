@@ -86,6 +86,7 @@ let package = Package(
                 "NTFSLiteCore",
                 "NTFSLiteDiagnostics",
                 "NTFSLiteGateEvidence",
+                "NTFSLiteHelperExecution",
                 "NTFSLiteHelperProtocol",
                 "NTFSLiteMutationPreparation",
                 "NTFSLitePresentation",
@@ -110,15 +111,20 @@ let package = Package(
             name: "NTFSLiteGate1EvidenceTool",
             dependencies: ["NTFSLiteGateEvidence", "NTFSLiteSystem"]
         ),
+        // Pure helper execution decisions over injected system operations; no mutation APIs.
+        .target(
+            name: "NTFSLiteHelperExecution",
+            dependencies: ["NTFSLiteHelperProtocol"]
+        ),
         // ADR 0010: privileged launchd daemon; the only target allowed disk mutation APIs.
         .executableTarget(
             name: "NTFSLiteHelper",
-            dependencies: ["NTFSLiteHelperProtocol"]
+            dependencies: ["NTFSLiteHelperExecution", "NTFSLiteHelperProtocol", "NTFSLiteSystem"]
         ),
         // Issue 02 tracer for SMAppService registration and the signed XPC channel.
         .executableTarget(
             name: "NTFSLiteHelperTracer",
-            dependencies: ["NTFSLiteHelperProtocol"],
+            dependencies: ["NTFSLiteHelperProtocol", "NTFSLiteSystem"],
             linkerSettings: [.linkedFramework("ServiceManagement")]
         ),
     ]
