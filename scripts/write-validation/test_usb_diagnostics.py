@@ -118,6 +118,14 @@ class USBDiagnosticChecks(unittest.TestCase):
         self.assertEqual(details['errnoName'], 'EOPNOTSUPP')
         self.assertNotIn('private', json.dumps(details))
 
+    def test_root_started_driver_keeps_upstream_silent_after_disabling_default_options(self):
+        # no_def_opts cancels NTFS-3G's default `silent`; without it, chown of a new entry to
+        # the file-operation user (uid 501) differs from the root context uid and fails.
+        options = usb_lab.OPTIONS.split(',')
+        self.assertIn('silent', options)
+        self.assertGreater(options.index('silent'), options.index('no_def_opts'))
+        self.assertFalse({'allow_other', 'nonempty', 'permissions'} & set(options))
+
     def test_usb_driver_logs_its_own_errors(self):
         self.assertNotIn('quiet', usb_lab.OPTIONS.split(','))
 

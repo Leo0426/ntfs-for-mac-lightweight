@@ -34,7 +34,9 @@ BASE = Path(__file__).resolve().parents[2]
 TARGET_DIGEST = '8d76fcf2d907e33a0655489a359b99d41e719527b4b3b5163311c0c47b9cc39d'
 BUILD = BASE / '.build/dependency-candidates/ntfs-3g-build'
 # No 'quiet': the driver's own error reports go to the per-run mount log.
-OPTIONS = 'rw,no_def_opts,backend=fskit,norecover,no_detach,local'
+# no_def_opts also cancels NTFS-3G's default `silent`; restore it so chown of new entries to
+# the file-operation user does not fail against the root-started driver's context uid.
+OPTIONS = 'rw,no_def_opts,silent,backend=fskit,norecover,no_detach,local'
 ARTIFACTS = {
     BUILD / 'src/ntfs-3g': '95ea1bb325cfc39f0c76999e4d98049bdd58f51929e0152432828d4d3cd4d2fc',
     BUILD / 'src/ntfs-3g.probe': 'c917ddbf3c2350513d534139ef38dbb55b6c7a52957832e4744e3f77e82a625b',

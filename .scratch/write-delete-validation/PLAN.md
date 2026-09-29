@@ -384,3 +384,15 @@ FSKit/PluginKit 状态问题，但该历史说明不能证明本机的具体原�
 - 诊断增强：失败记录新增 `failedAt`（文件名:函数:行号，不含目录或错误正文）；USB 驱动去掉
   `quiet`，ntfs-3g 自身错误写入运行内挂载日志。2 项新增回归先红后绿，77 项实验测试及
   `scripts/check.sh` 通过。已恢复原生只读挂载，待下一次管理员运行定位具体调用。
+
+## EOPNOTSUPP 根因：no_def_opts 取消了默认 silent（2026-09-29）
+
+- `usb-run-xzbp8t4h/` 定位 `failedAt=file_cycle.py:__init__:39`，即测试目录 `mkdir`；目录实际已建立。
+- NTFS-3G 2026.7.7 源码：上下文 `uid = getuid()`（驱动以 root 启动，记为 0）；权限未启用时
+  `chown` 目标与上下文 uid/gid 不同即返回 `-EOPNOTSUPP`，除非 `silent`。`silent` 默认开启，
+  但 `no_def_opts` 同时取消默认 silent（`ntfs-3g_common.c:377-378`）。uid 501 新建条目时的
+  属主设置因此失败；镜像对照由 uid 501 启动驱动，上下文 uid 一致，所以未暴露。
+- 修正：USB 驱动固定参数改为 `rw,no_def_opts,silent,backend=fskit,norecover,no_detach,local`，
+  恢复上游默认的 silent，不启用 permissions，也不带回 `allow_other,nonempty`。镜像上带该
+  参数的实际挂载、33 项 prepare/cleanup 与标准卸载通过；1 项新增回归先红后绿；
+  `scripts/check.sh` 通过。
