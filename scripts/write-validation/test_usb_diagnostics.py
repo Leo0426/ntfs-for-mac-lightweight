@@ -8,7 +8,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 
-from usb_lab import main
+import usb_lab
+from usb_lab import failure_details, main
 from usb_target import TargetError
 
 
@@ -105,6 +106,20 @@ class USBDiagnosticChecks(unittest.TestCase):
         self.assertEqual(failed[0]['reason'], 'mountProcessExited')
         self.assertFalse(failed[0]['journalRecorded'])
         self.assertNotIn('private', json.dumps(reports))
+
+    def test_failure_reports_innermost_call_site_without_directory_path(self):
+        def fsync_step():
+            raise OSError(errno.EOPNOTSUPP, 'private text', '/private/secret/file')
+        try:
+            fsync_step()
+        except OSError as error:
+            details = failure_details(error, 'fileCycle')
+        self.assertRegex(details['failedAt'], r'^test_usb_diagnostics\.py:fsync_step:[0-9]+$')
+        self.assertEqual(details['errnoName'], 'EOPNOTSUPP')
+        self.assertNotIn('private', json.dumps(details))
+
+    def test_usb_driver_logs_its_own_errors(self):
+        self.assertNotIn('quiet', usb_lab.OPTIONS.split(','))
 
     def test_lock_failure_reports_phase_and_errno_without_private_error_text(self):
         self.open.side_effect = OSError(errno.EIO, 'private diagnostic', '/private/secret/path')

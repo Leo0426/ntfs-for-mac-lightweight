@@ -372,3 +372,15 @@ FSKit/PluginKit 状态问题，但该历史说明不能证明本机的具体原�
   不变；物理分区无原生挂载；固定摘要、uid 501 的本轮驱动经 `lsof` 证明持有该物理分区。
   5 项新增回归先红后绿；`scripts/check.sh` 退出 0（75 项实验测试）。
 - 失败后已由系统 `diskutil mount` 恢复原生只读挂载，准备重跑。USB 写删与 Windows 仍未通过。
+
+## FSKit 绑定通过，文件操作 EOPNOTSUPP（2026-09-29）
+
+- `usb-run-n_q1gjd9/`：原生卸载、`writableMountVerified`（虚拟来源 + lsof 持有物理分区）通过；
+  随后小数据集在建立测试目录后、首个文件前以 `OSError/EOPNOTSUPP(102)` 失败。收尾标准卸载
+  `unmountVerified`、`failureHandlingFinished`。原生只读挂载可见 U 盘仅有空测试目录。
+- 本机 FSKit 镜像上以真实 uid 501 运行同一 `prepare()` 33 项通过；手动附加 `blkdev` 选项仍通过。
+  普通用户无法以块设备形式挂载（ntfs-3g 拒绝），块设备后端与 root 实际 uid + 临时 euid 的
+  文件操作身份两项差异尚未区分。
+- 诊断增强：失败记录新增 `failedAt`（文件名:函数:行号，不含目录或错误正文）；USB 驱动去掉
+  `quiet`，ntfs-3g 自身错误写入运行内挂载日志。2 项新增回归先红后绿，77 项实验测试及
+  `scripts/check.sh` 通过。已恢复原生只读挂载，待下一次管理员运行定位具体调用。
