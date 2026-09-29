@@ -1,6 +1,6 @@
 # NTFS 写入、删除与持久化验证闭环
 
-Status: in-progress / image-passed-usb-awaiting-v2-run（最新状态见末节）
+Status: usb-local-checks-passed / windows-pending（最新状态见末节与 USB-RESULT.md）
 Date: 2026-09-09
 Assignee: Codex
 
@@ -417,3 +417,12 @@ FSKit/PluginKit 状态问题，但该历史说明不能证明本机的具体原�
 - 修正：驱动 `start_new_session=True`；`--run` 忽略 SIGHUP；终端输出失败不再中断运行，
   journal 仍为记录。3 项新增回归先红后绿，83 项实验测试通过；完整 `scripts/check.sh`
   因当前挂载表挂起，待重启后运行。
+
+## USB 本机闭环通过（2026-09-29 14:04–14:41）
+
+- 用户重启后现场干净；完整 `scripts/check.sh` 通过（83 项实验测试），镜像对照
+  `mountContextVerified`，目标 disk6 `targetMatched`。上次中断后 no-recovery 健康检查仍通过。
+- `usb-run-cp3auc6d/` 十个阶段依次通过至 `localChecksPassed`：33 项清理检查、34 项数据集
+  （含 4 GiB + 1 字节）、新挂载点重挂载后独立读回 22 个保留文件与 6 个删除项。无残留进程、
+  挂载或本轮挂载点。结果见 [USB 结果](USB-RESULT.md)。
+- 下一步：Windows 复核（用户后置）与整盘推出核对；Gate 1–3 完整矩阵及正式 App 接线仍未开始。

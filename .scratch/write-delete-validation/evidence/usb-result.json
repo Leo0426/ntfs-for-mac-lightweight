@@ -1,0 +1,32 @@
+{
+  "run": "usb-run-cp3auc6d",
+  "date": "2026-09-29",
+  "os": "macOS 27.0 (26A428)",
+  "macfuse": "5.4.0",
+  "ntfs3g": "2026.7.7 user-mount v2",
+  "media": "XMUP22YM",
+  "physicalBytes": 124623257600,
+  "partitionBytes": 124411445248,
+  "stages": [
+    "started",
+    "nativeUnmountVerified",
+    "writableMountVerified",
+    "cleanupVerified",
+    "fileChecksPassed",
+    "unmountVerified",
+    "writableMountVerified",
+    "remountReadbackVerified",
+    "unmountVerified",
+    "localChecksPassed"
+  ],
+  "cleanupChecks": 33,
+  "fileChecks": 34,
+  "largeFileBytes": 4294967297,
+  "retainedFiles": 22,
+  "deletedEntries": 6,
+  "remountVerified": true,
+  "status": "localChecksPassed",
+  "usbVerified": true,
+  "windowsVerified": false,
+  "safeToRemoveVerified": false
+}
