@@ -26,5 +26,5 @@ FSKit 可写挂载的标准卸载（以挂载用户身份，等待驱动退出�
 
 U 盘实测：helper 挂载后写入 1 MiB 文件 → `unmount` 返回 0、驱动退出、挂载点删除 → 原生只读重挂载
 SHA-256 一致；再次挂载后 `eject` 被拒（27 stillMounted）→ 写入 4 KiB 文件 → `unmount-disk` 0 →
-`eject` 0，`/dev/disk6` 消失。第二个文件的重插读回待用户重新插盘后核对
-（SHA-256 `e9e4750aff6ca43fc18bba448855e8eee6d6406fdee14220037153e0aafce426`）。
+`eject` 0，`/dev/disk6` 消失。用户重新插盘后，原生只读挂载读回两个文件，SHA-256 均一致
+（`e57a2147…`、`e9e4750a…`）。
