@@ -47,15 +47,20 @@ func reachableTargets(from root: String) -> Set<String> {
 let readOnlyApp = "NTFSLiteReadOnlyApp"
 let gateEvidence = "NTFSLiteGateEvidence"
 let gateEvidenceTool = "NTFSLiteGate1EvidenceTool"
-let readOnlyRoots = [readOnlyApp, gateEvidence, gateEvidenceTool]
-for root in readOnlyRoots {
-    guard dependencies[root] != nil else {
-        FileHandle.standardError.write(
-            Data("FAIL: 缺少只读 root target：\(root)。\n".utf8)
-        )
-        exit(1)
-    }
-
+// ADR 0010: the formal app is the composition root and may reach the helper protocol and
+// mutation preparation. Evidence tooling and the lower product layers must not.
+let requiredRoots = [readOnlyApp, gateEvidence, gateEvidenceTool]
+let mutationFreeRoots = [
+    gateEvidence, gateEvidenceTool,
+    "NTFSLiteCore", "NTFSLiteSystem", "NTFSLitePresentation", "NTFSLiteDiagnostics",
+]
+for root in requiredRoots where dependencies[root] == nil {
+    FileHandle.standardError.write(
+        Data("FAIL: 缺少只读 root target：\(root)。\n".utf8)
+    )
+    exit(1)
+}
+for root in mutationFreeRoots where dependencies[root] != nil {
     let violations = reachableTargets(from: root).intersection(forbidden).sorted()
     guard violations.isEmpty else {
         let message =
@@ -87,4 +92,4 @@ guard appViolations.isEmpty else {
     exit(1)
 }
 
-print("PASS: 正式应用、Gate Evidence 与 Evidence Tool 均保持独立只读依赖边界。")
+print("PASS: Gate Evidence、Evidence Tool 与下层产品模块保持只读依赖边界；正式应用按 ADR 0010 可接入 helper。")

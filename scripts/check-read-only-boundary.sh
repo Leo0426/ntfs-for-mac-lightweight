@@ -71,6 +71,33 @@ assert_package_boundary_rejects \
     '{"targets":[{"name":"NTFSLiteReadOnlyApp","target_dependencies":["AppBridge"]},{"name":"AppBridge","target_dependencies":["NTFSLiteGate1EvidenceTool"]},{"name":"NTFSLiteGateEvidence","target_dependencies":[]},{"name":"NTFSLiteGate1EvidenceTool","target_dependencies":["NTFSLiteGateEvidence"]}]}' \
     "正式只读应用不得依赖 Evidence 工具链"
 
+assert_package_boundary_rejects \
+    "展示层进入 mutation" \
+    '{"targets":[{"name":"NTFSLiteReadOnlyApp","target_dependencies":["NTFSLitePresentation"]},{"name":"NTFSLitePresentation","target_dependencies":["NTFSLiteMutationPreparation"]},{"name":"NTFSLiteGateEvidence","target_dependencies":[]},{"name":"NTFSLiteGate1EvidenceTool","target_dependencies":["NTFSLiteGateEvidence"]},{"name":"NTFSLiteCore","target_dependencies":[]},{"name":"NTFSLiteSystem","target_dependencies":["NTFSLiteCore"]},{"name":"NTFSLiteDiagnostics","target_dependencies":["NTFSLiteCore"]},{"name":"NTFSLiteHelperProtocol","target_dependencies":[]},{"name":"NTFSLiteMutationPreparation","target_dependencies":["NTFSLiteHelperProtocol"]}]}' \
+    "NTFSLitePresentation 依赖进入变更边界"
+
+assert_package_boundary_rejects \
+    "系统层间接进入 helper" \
+    '{"targets":[{"name":"NTFSLiteReadOnlyApp","target_dependencies":[]},{"name":"NTFSLitePresentation","target_dependencies":[]},{"name":"NTFSLiteGateEvidence","target_dependencies":[]},{"name":"NTFSLiteGate1EvidenceTool","target_dependencies":["NTFSLiteGateEvidence"]},{"name":"NTFSLiteCore","target_dependencies":[]},{"name":"NTFSLiteSystem","target_dependencies":["SystemBridge"]},{"name":"SystemBridge","target_dependencies":["NTFSLiteHelperProtocol"]},{"name":"NTFSLiteDiagnostics","target_dependencies":[]},{"name":"NTFSLiteHelperProtocol","target_dependencies":[]}]}' \
+    "NTFSLiteSystem 依赖进入变更边界"
+
+assert_package_boundary_accepts() {
+    local fixture_name=$1
+    local package_json=$2
+    if ! print -rn -- "$package_json" \
+        | swift scripts/verify-read-only-package-boundary.swift >/dev/null 2>&1
+    then
+        print -u2 -r -- "FAIL: ADR 0010 允许的依赖被拒绝：$fixture_name"
+        exit 1
+    fi
+}
+
+# ADR 0010: the formal app is the composition root and may reach the helper protocol and
+# mutation preparation; lower layers must stay free of them.
+assert_package_boundary_accepts \
+    "正式应用接入 helper 与变更准备" \
+    '{"targets":[{"name":"NTFSLiteReadOnlyApp","target_dependencies":["NTFSLitePresentation","NTFSLiteMutationPreparation","NTFSLiteHelperProtocol"]},{"name":"NTFSLitePresentation","target_dependencies":["NTFSLiteCore"]},{"name":"NTFSLiteGateEvidence","target_dependencies":[]},{"name":"NTFSLiteGate1EvidenceTool","target_dependencies":["NTFSLiteGateEvidence"]},{"name":"NTFSLiteCore","target_dependencies":[]},{"name":"NTFSLiteSystem","target_dependencies":["NTFSLiteCore"]},{"name":"NTFSLiteDiagnostics","target_dependencies":["NTFSLiteCore"]},{"name":"NTFSLiteHelperProtocol","target_dependencies":[]},{"name":"NTFSLiteMutationPreparation","target_dependencies":["NTFSLiteHelperProtocol"]}]}'
+
 print -r -- "PASS: 只读包边界负向样例均按预期失败关闭。"
 
 for source_file in ${(f)"$(grep -R -l -E '\bProcess[[:space:]]*\(' Sources --include='*.swift' || true)"}; do
@@ -114,19 +141,31 @@ then
     exit 1
 fi
 
+# Never allowed in product code, including the privileged helper.
 if grep -R -n -E \
-    'DADisk(Unmount|Eject|Mount)|/sbin/(mount|umount)|/usr/sbin/diskutil|posix_spawn|remove_hiberfile|allow_other|backend=kext' \
+    'remove_hiberfile|allow_other|backend=kext|(^|[^o])recover([^y]|$)|kDADiskUnmountOptionForce|kDADiskEjectOptionForce|umount[^a-zA-Z]+-f' \
     Sources \
     --include='*.swift' \
     --exclude-dir='NTFSLiteCoreChecks'
 then
-    print -u2 -r -- "FAIL: 产品源码出现禁止的磁盘变更 API 或策略。"
+    print -u2 -r -- "FAIL: 产品源码出现禁止的磁盘策略。"
+    exit 1
+fi
+
+# ADR 0010: real disk mutation APIs live only in the privileged helper target.
+if grep -R -n -E \
+    'DADisk(Unmount|Eject|Mount)|/sbin/(mount|umount)|/usr/sbin/diskutil|posix_spawn' \
+    Sources \
+    --include='*.swift' \
+    --exclude-dir='NTFSLiteCoreChecks' \
+    --exclude-dir='NTFSLiteHelper'
+then
+    print -u2 -r -- "FAIL: helper 之外的产品源码出现磁盘变更 API。"
     exit 1
 fi
 
 if grep -R -n -E \
     '^import (NTFSLiteMutationPreparation|NTFSLiteHelperProtocol)$' \
-    Sources/NTFSLiteReadOnlyApp \
     Sources/NTFSLiteGateEvidence \
     Sources/NTFSLiteGate1EvidenceTool \
     Sources/NTFSLitePresentation \
@@ -134,7 +173,7 @@ if grep -R -n -E \
     Sources/NTFSLiteSystem \
     Sources/NTFSLiteCore
 then
-    print -u2 -r -- "FAIL: 只读产品模块导入了变更或 helper 模块。"
+    print -u2 -r -- "FAIL: 下层或证据模块导入了变更或 helper 模块。"
     exit 1
 fi
 

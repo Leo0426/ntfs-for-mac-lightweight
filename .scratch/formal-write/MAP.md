@@ -7,7 +7,7 @@ PRD：[PRD.md](PRD.md) · 决策：[ADR 0010](../../docs/adr/0010-enable-writabl
 
 | # | Issue | 依赖 | 状态 |
 |---|---|---|---|
-| 01 | [规则与依赖边界更新](issues/01-boundary-rules.md) | — | ready-for-agent |
+| 01 | [规则与依赖边界更新](issues/01-boundary-rules.md) | — | resolved |
 | 02 | [SMAppService + XPC 签名可行性 tracer](issues/02-helper-tracer.md) | 01 | ready-for-agent |
 | 03 | [helper：目标复核、健康检查与可写挂载](issues/03-helper-writable-mount.md) | 02 | ready-for-agent |
 | 04 | [helper：标准卸载与推出整盘](issues/04-helper-unmount-eject.md) | 03 | ready-for-agent |

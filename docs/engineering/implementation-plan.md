@@ -101,7 +101,7 @@
   自动改写 Gate 状态。
 - Gate 2 磁盘镜像和 Gate 3 可牺牲物理盘验证。
 
-在完成磁盘镜像 Gate 前，任何代码都不得修改真实用户磁盘。
+开发与验证中的真实磁盘操作只允许在一次性镜像和用户授权的可牺牲 U 盘上执行，不得在用户数据盘上试验（ADR 0010）。
 
 ## 当前 Gate 状态
 
@@ -132,7 +132,7 @@
   确认包含这三项修复，但仍为 pre-release，不满足版本监视触发器；任何版本都必须作为新的
   精确候选完成 DMG 代码签名核对和镜像矩阵后再验证。
 - **Gate 3：未通过。** 需要可牺牲物理盘、Windows 环境、`chkdsk` 与内容哈希矩阵，当前没有这些实物证据。
-- **Gate 4：未进入变更能力。** 已提前完成正式只读 C 版壳、物理盘分组、多卷唯一展示序号、按选择身份触发的辅助功能事件、保留/展示选择与导航焦点纯逻辑契约、Setup 动作、诊断交互和可重复的自动映射检查；observer→coordinator→MountEngine→`VolumePresentation` 正式接线尚未实现，320 pt、深浅色、高对比、真实键盘焦点提交和 VoiceOver 仍缺 Issue 13 的人工验收。Gate 1–3 通过前不会加入挂载、卸载、推出或写入按钮。
+- **Gate 4：未进入变更能力。** 已提前完成正式只读 C 版壳、物理盘分组、多卷唯一展示序号、按选择身份触发的辅助功能事件、保留/展示选择与导航焦点纯逻辑契约、Setup 动作、诊断交互和可重复的自动映射检查；observer→coordinator→MountEngine→`VolumePresentation` 正式接线尚未实现，320 pt、深浅色、高对比、真实键盘焦点提交和 VoiceOver 仍缺 Issue 13 的人工验收。按 [ADR 0010](../adr/0010-enable-writable-mount-in-formal-app.md)，写入与安全推出入口不再等待 Gate 1–3，接入工作见 `.scratch/formal-write/`；Gate 4 状态仍以本文件证据为准。
 - **Gate 5：未进入。** 本地只读构建验证、供应链记录格式和回滚说明已有；helper、Developer ID、Hardened Runtime、公证、依赖批准和两周个人使用验证均未完成。
 
 ## 模块边界
@@ -189,7 +189,7 @@ SwiftUI C 版主窗口 ──> VolumeCoordinator actor
 - UI 只能针对完整当前实例提交固定语义“这是数据卷且不是 Windows 启动/系统卷”的声明；不能
   构造 `VolumeSnapshot`、角色证据或任何 System Evidence。声明不持久化，并在重插、重订阅、
   拓扑变化、请求消费或应用重启后失效。
-- 当前只读应用不得依赖 `NTFSLiteMutationPreparation` 或 `NTFSLiteHelperProtocol`；新增依赖必须先更新只读边界 ADR，并取得对应 Gate 证据。
+- ADR 0010：正式应用作为组合根可依赖 `NTFSLiteMutationPreparation` 与 `NTFSLiteHelperProtocol`；Core、System、Presentation、Diagnostics 与 Gate 证据工具链仍不得进入；真实磁盘变更 API 只在特权 helper target 内。
 - `VolumeCoordinator` 是唯一用户变更入口。
 - UI 发起写入或推出时必须传完整 `VolumeInstanceID`，不能只传可被重插复用的 `VolumeID` 或 BSD 名。
 - `MountEngine` 只能从 `VolumeCoordinator.executeMutation` 的 package-only engine 入口接收已领取的
