@@ -302,6 +302,11 @@ public actor HelperRequestAdmission {
 
     private init() {}
 
+    /// A separate replay set for package behavior checks; the helper uses `processLifetime`.
+    package static func isolatedForChecks() -> HelperRequestAdmission {
+        HelperRequestAdmission()
+    }
+
     public func admit(
         _ data: Data
     ) -> Result<AdmittedHelperRequest, HelperRequestRejection> {

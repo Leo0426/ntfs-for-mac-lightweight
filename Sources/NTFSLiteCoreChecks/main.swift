@@ -16239,3 +16239,47 @@ func boundedSetupProbeRequiresBothOutputStreamsToFinish() async {
 
 await boundedSetupProbeRequiresBothOutputStreamsToFinish()
 print("PASS: Setup probes require EOF on both streams and reject delayed stdout or stderr")
+
+func helperRequestProcessorExecutesOnlyFreshAdmittedRequests() async {
+    final class Calls: @unchecked Sendable { var count = 0 }
+    let calls = Calls()
+    let processor = HelperRequestProcessor(admission: .isolatedForChecks()) { _ in
+        calls.count += 1
+        return HelperResponseEnvelope(resultCode: .succeeded, exitStatus: 0)
+    }
+    func decode(_ data: Data) -> HelperResponseEnvelope? {
+        try? HelperResponseDecoder().decode(data).get()
+    }
+    let malformed = decode(await processor.respond(to: Data("{}".utf8)))
+    expect(malformed?.resultCode == .rejectedMalformedEnvelope && calls.count == 0,
+           "a malformed request must be rejected without reaching the executor")
+    let request = try! HelperRequestEnvelope(
+        operationID: HelperOperationID(), action: .ejectDisk,
+        target: .disk(HelperDiskInstanceIdentity(physicalDiskBSDName: "disk42", mediaGeneration: 7))
+    )
+    let data = try! JSONEncoder().encode(request)
+    let first = decode(await processor.respond(to: data))
+    expect(first?.resultCode == .succeeded && calls.count == 1,
+           "a fresh admitted request must reach the executor exactly once")
+    let replay = decode(await processor.respond(to: data))
+    expect(replay?.resultCode == .rejectedReplayedOperation && calls.count == 1,
+           "a replayed operation must be rejected without executing again")
+}
+
+await helperRequestProcessorExecutesOnlyFreshAdmittedRequests()
+print("PASS: helper XPC processor admits once, rejects malformed and replayed requests before execution")
+
+func helperServiceRequirementsPinTeamAndIdentifiers() {
+    expect(HelperServiceIdentity.clientRequirement ==
+           "anchor apple generic and identifier \"com.leolu.ntfslite.readonly\" and certificate leaf[subject.OU] = \"NP3U2GYHWL\"",
+           "the helper must accept only the formal app signed by the pinned team")
+    expect(HelperServiceIdentity.helperRequirement ==
+           "anchor apple generic and identifier \"com.leolu.ntfslite.helper\" and certificate leaf[subject.OU] = \"NP3U2GYHWL\"",
+           "the app must accept only the helper signed by the pinned team")
+    expect(HelperServiceIdentity.machServiceName == HelperServiceIdentity.helperIdentifier
+           && HelperServiceIdentity.daemonPlistName == "com.leolu.ntfslite.helper.plist",
+           "the launchd label, mach service and plist name must stay aligned")
+}
+
+helperServiceRequirementsPinTeamAndIdentifiers()
+print("PASS: helper XPC code-signing requirements pin the team and both identifiers")

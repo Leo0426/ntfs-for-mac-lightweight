@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.leolu.ntfslite.helper</string>
+	<key>BundleProgram</key>
+	<string>Contents/MacOS/NTFSLiteHelper</string>
+	<key>MachServices</key>
+	<dict>
+		<key>com.leolu.ntfslite.helper</key>
+		<true/>
+	</dict>
+	<key>AssociatedBundleIdentifiers</key>
+	<array>
+		<string>com.leolu.ntfslite.readonly</string>
+	</array>
+</dict>
+</plist>
