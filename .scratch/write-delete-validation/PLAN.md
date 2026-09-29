@@ -356,3 +356,19 @@ FSKit/PluginKit 状态问题，但该历史说明不能证明本机的具体原�
   `libfuse.2.dylib` 均不存在。缓存的 macFUSE 5.4.0 DMG 摘要与固定值一致、镜像校验通过。
   macFUSE 5.4.0 在 macOS 27.0 上的兼容性尚未验证；重新安装和启用扩展由用户执行。
 - `scripts/check.sh` 退出 0（72 项实验测试）。USB 写删、重挂载读回与 Windows 复核仍未通过。
+
+## macOS 27 首次 USB 运行：FSKit 虚拟挂载来源（2026-09-29）
+
+- 重新安装缓存的 macFUSE 5.4.0（摘要一致、镜像校验通过；GitHub API 显示其为最新正式版，
+  发布说明称 FSKit 后端以 macOS 27 SDK 构建，查询日期 2026-09-29）。首次镜像对照在扩展刚
+  开启后以 `mountProcessExited` 失败（日志因 quiet 为空），随后手动与正式对照
+  `context-probe-loj9xkl6/` 均通过；首败原因未证实。
+- `usb-run-3nb_8xf9/`：原生卸载通过，FSKit 可写挂载实际建立，但挂载表来源是 4 KiB 虚拟
+  Disk Image（`/dev/disk9`），diskutil 视 disk8s2 为未挂载；`mountedTargetMismatch` 在任何
+  文件写入前失败。新的即时落证先输出 `failed`，收尾保留驱动。核对驱动 PID/uid/参数与
+  本轮挂载点后执行标准 `umount`，驱动退出，`failureHandlingFinished`；无残留。
+- 修正：此前“挂载 source 必须精确为物理分区”在 macFUSE FSKit 下不可满足。改为要求：
+  唯一本轮挂载点的 macfuse/fskit/local/nodev/nosuid 可写挂载；来源为 4 KiB 虚拟整盘且本轮内
+  不变；物理分区无原生挂载；固定摘要、uid 501 的本轮驱动经 `lsof` 证明持有该物理分区。
+  5 项新增回归先红后绿；`scripts/check.sh` 退出 0（75 项实验测试）。
+- 失败后已由系统 `diskutil mount` 恢复原生只读挂载，准备重跑。USB 写删与 Windows 仍未通过。

@@ -96,6 +96,20 @@ def verify_driver_identity(process):
     require(process.poll() is None, 'driverNotRunning')
 
 
+def verify_fskit_binding(process, node, source):
+    # The FSKit mount source is a 4 KiB virtual placeholder disk; bind the mount to the
+    # physical partition by proving the owned driver process holds that exact device open.
+    facts = plist(['info', '-plist', source])
+    require(facts.get('DeviceNode') == source and facts.get('WholeDisk') is True
+            and facts.get('VirtualOrPhysical') == 'Virtual'
+            and facts.get('BusProtocol') == 'Disk Image' and facts.get('TotalSize') == 4096,
+            'mountSourceNotFSKitPlaceholder')
+    held = subprocess.run(['/usr/sbin/lsof', '-a', '-p', str(process.pid), '-Fn', node],
+                          capture_output=True, timeout=20)
+    fields = held.stdout.decode('utf8', 'replace').splitlines() if held.returncode == 0 else []
+    require('p' + str(process.pid) in fields and 'n' + node in fields, 'driverNotHoldingTarget')
+
+
 def private_target():
     path = BASE / '.build/write-validation/approved-usb-target.json'
     require(path.resolve(strict=True) == path, 'targetReceiptLink')
@@ -246,6 +260,7 @@ class USBLab:
         self.process = None
         self.pending_mutation = None
         self.mount_device = None
+        self.mount_source = None
         self.counter = 0
         self.manifest = None
         self.remount_verified = False
@@ -302,10 +317,13 @@ class USBLab:
             require(facts['mountpoint'] == '' and not any(line.startswith(self.node + ' on ')
                     or ' on ' + str(self.root) + ' ' in line for line in lines), 'volumeStillMounted')
         else:
-            require(facts['mountpoint'] == str(self.root) and facts['writable'] is True,
-                    'mountedTargetMismatch')
+            # diskutil does not attribute FSKit mounts to the partition; it must show none.
+            require(facts['mountpoint'] == '', 'nativeMountPresent')
             verify_driver_identity(self.process)
-            check_writable_mount(lines, self.node, str(self.root))
+            _, source = check_writable_mount(lines, self.node, str(self.root))
+            verify_fskit_binding(self.process, self.node, source)
+            require(self.mount_source in (None, source), 'mountInstanceChanged')
+            verify_driver_identity(self.process)
             with filesystem_identity():
                 require(self.root.resolve(strict=True) == self.root
                         and self.root.stat().st_dev != self.root.parent.stat().st_dev
@@ -357,7 +375,9 @@ class USBLab:
                 self.guard('writable')
                 with filesystem_identity():
                     self.mount_device = self.root.stat().st_dev
-                self.journal('writableMountVerified', mountLine=check_writable_mount(lines, self.node, str(self.root)))
+                line, self.mount_source = check_writable_mount(mounts(), self.node, str(self.root))
+                self.guard('writable')
+                self.journal('writableMountVerified', mountLine=line)
                 return
             time.sleep(0.25)
         raise TargetError('mountNotObservedBeforeDeadline')
@@ -393,6 +413,7 @@ class USBLab:
         require(wait_for_mutation(self.process) == 0, 'driverExitFailed')
         self.process = None
         self.mount_device = None
+        self.mount_source = None
         self.health()
         self.journal('unmountVerified')
 

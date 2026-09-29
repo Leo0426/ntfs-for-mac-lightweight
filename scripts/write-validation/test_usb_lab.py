@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-from usb_lab import complete_cycle, wait_for_mutation, USBLab, defer_interrupts
+from usb_lab import complete_cycle, wait_for_mutation, USBLab, defer_interrupts, verify_fskit_binding
 from usb_target import TargetError
 
 
@@ -26,6 +26,38 @@ class FakeLab:
     def unmount(self): self.step('unmount')
     def verify(self): self.step('verify')
     def finish(self): self.step('finish')
+
+
+class FSKitBindingChecks(unittest.TestCase):
+    def setUp(self):
+        self.facts = {'DeviceNode': '/dev/disk9', 'WholeDisk': True, 'VirtualOrPhysical': 'Virtual',
+                      'BusProtocol': 'Disk Image', 'TotalSize': 4096}
+        self.plist = self.enterContext(patch('usb_lab.plist', side_effect=lambda _: dict(self.facts)))
+        self.held = subprocess.CompletedProcess([], 0, b'p4242\nf3\nn/dev/disk6s2\n', b'')
+        self.lsof = self.enterContext(patch('usb_lab.subprocess.run', side_effect=lambda *a, **k: self.held))
+        self.process = type('P', (), {'pid': 4242})()
+
+    def test_accepts_virtual_source_when_owned_driver_holds_the_partition(self):
+        verify_fskit_binding(self.process, '/dev/disk6s2', '/dev/disk9')
+        args = self.lsof.call_args.args[0]
+        self.assertEqual(args, ['/usr/sbin/lsof', '-a', '-p', '4242', '-Fn', '/dev/disk6s2'])
+
+    def test_rejects_physical_or_unexpected_virtual_source(self):
+        for key, value in [('VirtualOrPhysical', 'Physical'), ('TotalSize', 8192), ('WholeDisk', False),
+                           ('BusProtocol', 'USB'), ('DeviceNode', '/dev/disk10')]:
+            with self.subTest(key=key):
+                self.facts[key] = value
+                with self.assertRaises(TargetError): verify_fskit_binding(self.process, '/dev/disk6s2', '/dev/disk9')
+                self.setUp()
+
+    def test_rejects_when_driver_does_not_hold_target_partition(self):
+        for held in [subprocess.CompletedProcess([], 1, b'', b''),
+                     subprocess.CompletedProcess([], 0, b'p4242\nf3\nn/dev/disk7s2\n', b''),
+                     subprocess.CompletedProcess([], 0, b'p999\nf3\nn/dev/disk6s2\n', b''),
+                     subprocess.CompletedProcess([], 2, b'p4242\nn/dev/disk6s2\n', b'')]:
+            with self.subTest(held=held):
+                self.held = held
+                with self.assertRaises(TargetError): verify_fskit_binding(self.process, '/dev/disk6s2', '/dev/disk9')
 
 
 class USBLabSequenceChecks(unittest.TestCase):

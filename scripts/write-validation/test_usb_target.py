@@ -75,13 +75,19 @@ class USBTargetChecks(unittest.TestCase):
                     self.check()
                 self.volume[key] = original
 
-    def test_only_exact_device_and_fskit_writable_mount_are_accepted(self):
-        line = '/dev/disk6s2 on /Volumes/Lab (macfuse, local, nodev, nosuid, fskit)'
-        self.assertEqual(check_writable_mount([line], '/dev/disk6s2', '/Volumes/Lab'), line)
-        for lines in [[], [line, line], [line.replace('disk6s2', 'disk7s2')],
+    def test_fskit_writable_mount_uses_virtual_whole_disk_source(self):
+        # macFUSE FSKit mounts show a 4 KiB virtual disk as source; the driver holds the partition.
+        line = ('/dev/disk9 on /Volumes/Lab (macfuse, local, nodev, nosuid, noowners, noatime, '
+                'fskit, mounted by lab)')
+        self.assertEqual(check_writable_mount([line], '/dev/disk6s2', '/Volumes/Lab'),
+                         (line, '/dev/disk9'))
+        native = '/dev/disk6s2 on /Volumes/NTFS (ntfs, local, nodev, nosuid, read-only, fskit)'
+        for lines in [[], [line, line], [line.replace('disk9', 'disk6s2')],
+                      [line.replace('/dev/disk9', '/dev/disk9; x')],
                       [line.replace('fskit', 'read-only, fskit')],
                       [line.replace(', fskit', '')], [line.replace('macfuse,', 'ntfs,')],
-                      [line.replace('local, ', '')]]:
+                      [line.replace('local, ', '')], [line.replace('nosuid, ', '')],
+                      [line, native]]:
             with self.subTest(lines=lines), self.assertRaises(TargetError):
                 check_writable_mount(lines, '/dev/disk6s2', '/Volumes/Lab')
 

@@ -46,12 +46,19 @@ def check_target(expected, whole, volume, parts):
 
 
 def check_writable_mount(lines, device, root):
+    """Return (line, source) for the one writable FSKit mount at root.
+
+    macFUSE FSKit mounts report a virtual whole-disk placeholder as their source, not the
+    physical partition; the caller must separately prove the driver holds `device`.
+    """
     matches = [line for line in lines if ' on ' + root + ' ' in line]
     require(len(matches) == 1, 'mountMissingOrAmbiguous')
+    require(not any(line.startswith(device + ' on ') for line in lines), 'nativeMountPresent')
     line = matches[0]
-    prefix = device + ' on ' + root + ' (macfuse, '
-    require(line.startswith(prefix) and line.endswith(')'), 'mountSourceOrBackendMismatch')
-    flags = set(line[len(prefix):-1].split(', '))
+    source, _, rest = line.partition(' on ' + root + ' (macfuse, ')
+    require(re.fullmatch(r'/dev/disk[0-9]+', source) is not None and rest.endswith(')'),
+            'mountSourceOrBackendMismatch')
+    flags = set(rest[:-1].split(', '))
     require({'local', 'fskit', 'nodev', 'nosuid'} <= flags and 'read-only' not in flags,
             'mountNotVerifiedWritableFSKit')
-    return line
+    return line, source
