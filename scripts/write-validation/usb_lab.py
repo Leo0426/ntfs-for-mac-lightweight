@@ -45,7 +45,17 @@ ARTIFACTS = {
 
 
 def emit(stage, **values):
-    print(json.dumps({'stage': stage, **values}, sort_keys=True), flush=True)
+    # The terminal may be closed mid-run; the run's journal files remain the record.
+    try:
+        print(json.dumps({'stage': stage, **values}, sort_keys=True), flush=True)
+    except OSError:
+        pass
+
+
+def start_driver(driver, node, root, log):
+    # Own session: closing the launching terminal must not hang up the live driver.
+    return subprocess.Popen([str(driver), node, str(root), '-o', OPTIONS], stdout=log,
+                            stderr=subprocess.STDOUT, restore_signals=True, start_new_session=True)
 
 
 class SystemOperationError(TargetError):
@@ -392,9 +402,7 @@ class USBLab:
             os.fchmod(log.fileno(), 0o600)
             os.fchown(log.fileno(), self.owner, -1)
             with defer_interrupts():
-                self.process = subprocess.Popen([str(driver), self.node,
-                                                str(self.root), '-o', OPTIONS], stdout=log,
-                                               stderr=subprocess.STDOUT, restore_signals=True)
+                self.process = start_driver(driver, self.node, self.root, log)
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             require(self.process.poll() is None, 'mountProcessExited')
@@ -555,6 +563,8 @@ def main():
         def interrupted(_signum, _frame):
             raise InterruptedError('interrupted')
         signal.signal(signal.SIGTERM, interrupted)
+        # A closed terminal must not abort a run holding a live writable mount.
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
         operation = 'initializeExperiment'
         lab = USBLab(expected)
         operation = 'fileCycle'

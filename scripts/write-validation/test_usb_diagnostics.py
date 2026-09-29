@@ -9,7 +9,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import usb_lab
-from usb_lab import failure_details, main
+from usb_lab import emit, failure_details, main, start_driver
+import signal
 from usb_target import TargetError
 
 
@@ -29,7 +30,7 @@ class USBDiagnosticChecks(unittest.TestCase):
             st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1)))
         self.enterContext(patch('usb_lab.fcntl.flock'))
         self.enterContext(patch('usb_lab.os.close'))
-        self.enterContext(patch('usb_lab.signal.signal'))
+        self.signal = self.enterContext(patch('usb_lab.signal.signal'))
         self.cycle = self.enterContext(patch('usb_lab.complete_cycle'))
 
     def invoke_lines(self, mode):
@@ -125,6 +126,31 @@ class USBDiagnosticChecks(unittest.TestCase):
         self.assertIn('silent', options)
         self.assertGreater(options.index('silent'), options.index('no_def_opts'))
         self.assertFalse({'allow_other', 'nonempty', 'permissions'} & set(options))
+
+    def test_run_ignores_terminal_hangup_before_starting_experiment(self):
+        seen = []
+        def create(_expected):
+            seen.extend(self.signal.call_args_list)
+            return MagicMock()
+        with patch('usb_lab.USBLab', side_effect=create):
+            code, _ = self.invoke_lines('--run')
+        self.assertEqual(code, 0)
+        self.assertIn(((signal.SIGHUP, signal.SIG_IGN),), [tuple(c)[:1] for c in seen])
+
+    def test_emit_survives_a_closed_terminal(self):
+        class Closed:
+            def write(self, _): raise OSError(errno.EIO, 'closed')
+            def flush(self): raise OSError(errno.EIO, 'closed')
+        with patch('usb_lab.sys.stdout', Closed()):
+            emit('fileChecked', file='large.bin')
+
+    def test_driver_runs_in_its_own_session_outside_the_terminal(self):
+        with patch('usb_lab.subprocess.Popen') as popen:
+            start_driver(Path('/fixture/ntfs-3g'), '/dev/disk6s2', Path('/Volumes/Lab'), 'log')
+        args, kwargs = popen.call_args
+        self.assertEqual(args[0], ['/fixture/ntfs-3g', '/dev/disk6s2', '/Volumes/Lab', '-o', usb_lab.OPTIONS])
+        self.assertTrue(kwargs['start_new_session'])
+        self.assertEqual(kwargs['stdout'], 'log')
 
     def test_usb_driver_logs_its_own_errors(self):
         self.assertNotIn('quiet', usb_lab.OPTIONS.split(','))
