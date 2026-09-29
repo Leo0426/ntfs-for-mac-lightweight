@@ -1,8 +1,8 @@
 # UI：启用写入与安全推出
 
-Status: ready-for-agent
-Labels: enhancement, ready-for-agent
-Assignee:
+Status: resolved
+Labels: enhancement, resolved
+Assignee: Claude
 Blocked-by: 06
 
 ## 范围
@@ -15,3 +15,10 @@ Blocked-by: 06
 
 - 展示映射行为检查覆盖全部相关 `VolumeState`；按钮不可用时给出原因。
 - 键盘、VoiceOver 标签与深浅色可用（人工项另记）。
+
+## Resolution
+
+2026-09-29：卷详情“可执行操作”替换为 helper 状态/安装入口、“启用写入”（数据卷确认对话框，说明风险
+与验证边界）和“安全推出”，进行中显示进度并禁用；概览顶部“写入中的磁盘”独立于只读观察列出本次会话
+已启用写入的卷及其安全推出按钮。键盘、VoiceOver、深浅色人工验收并入 issue 09。已知限制：App 重启后
+不记忆写入中的卷（安全推出仍可在卷详情执行，helper 按驱动持有关系识别）。

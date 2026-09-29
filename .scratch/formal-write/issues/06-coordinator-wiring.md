@@ -1,8 +1,8 @@
 # 写入会话接线（ADR 0011）
 
-Status: ready-for-agent
-Labels: enhancement, ready-for-agent
-Assignee:
+Status: resolved
+Labels: enhancement, resolved
+Assignee: Claude
 Blocked-by: 05
 
 ## 范围
@@ -15,3 +15,9 @@ Blocked-by: 05
 
 - 行为检查：未确认拒绝；同盘互斥；超时/断线为状态未知；结果码映射为固定文字；结束后请求重新观察。
 - App 依赖边界检查通过。
+
+## Resolution
+
+2026-09-29：按 ADR 0011 新增 `NTFSLiteWriteSession`：未确认拒绝、同盘互斥、每次新 operation ID、
+仅固定动作、超时/断线/无效响应为状态未知不重发、`executionFailed` 与 `postconditionFailed` 分别映射为
+“未更改”与“需重新读取”，结果码映射为固定中文说明。行为检查先红后绿。操作结束后 Store 重新观察。
