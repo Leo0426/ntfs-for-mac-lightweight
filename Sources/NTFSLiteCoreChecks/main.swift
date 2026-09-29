@@ -68,6 +68,20 @@ func readySetupFacts() -> SetupFacts {
     )
 }
 
+func positiveFSKitSetupReport() -> SystemSetupReport {
+    SystemSetupReport(
+        facts: readySetupFacts(),
+        macFUSEEvidence: .notConfigured,
+        ntfs3GEvidence: .notConfigured,
+        authorizationStatus: .granted,
+        probeResult: SetupProbeResult(
+            fileSystemExtensionEnabled: true,
+            conflictScanComplete: true,
+            conflictingDriverIdentifiers: []
+        )
+    )
+}
+
 actor MutableSetupFactsStore {
     private var facts: SetupFacts
 
@@ -5475,7 +5489,12 @@ func setupPresentationShowsReadyEnvironment() {
         isRefreshing: false
     )
 
-    expect(presentation.title == "首次设置已完成", "ready setup should have a precise title")
+    expect(presentation.title == "只读环境检查完成", "ready check should have a precise title")
+    expect(
+        presentation.detail.contains("帮助程序")
+            && presentation.detail.contains("目标磁盘及挂载结果"),
+        "a ready read-only check must describe the helper checks without claiming it scans conflicts"
+    )
     expect(presentation.isReady, "ready setup should expose readiness")
     expect(!presentation.isBusy, "ready setup should not be busy")
     expect(presentation.primaryAction == .recheck, "ready setup should only offer recheck")
@@ -5503,6 +5522,177 @@ func setupPresentationShowsReadyEnvironment() {
         conflictRequirement?.detail.contains("范围") == true
             && conflictRequirement?.detail.contains("未检测到其他 NTFS 写入驱动") == false,
         "successful conflict evidence must describe its approved scope rather than global absence"
+    )
+}
+
+func setupPresentationGroupsRelatedChecksWithoutHidingFailures() {
+    let ready = SetupPresenter.presentation(
+        for: SetupChecker.assess(readySetupFacts()),
+        isRefreshing: false
+    )
+    expect(
+        ready.groups.map(\.id) == [
+            .systemCompatibility, .writeComponents, .fsKitSupport, .otherChecks,
+        ],
+        "Setup should show four related groups in a stable order"
+    )
+    expect(
+        ready.groups.map { $0.requirements.map(\.id) } == [
+            [.operatingSystem, .architecture],
+            [.macFUSE, .ntfs3G],
+            [.fileSystemExtension, .backend],
+            [.authorization, .conflictingDrivers],
+        ],
+        "each original Setup check should appear once in its related group"
+    )
+    expect(
+        ready.groups.allSatisfy { $0.state == .satisfied },
+        "a group with only satisfied checks should be satisfied"
+    )
+
+    let mixed = SetupPresenter.presentation(
+        for: SetupAssessment(issues: [
+            .macFUSEMissing,
+            .fileSystemExtensionDisabled,
+            .requiredAuthorizationUnavailable(.unknown),
+        ]),
+        isRefreshing: false
+    )
+    expect(
+        mixed.groups.map(\.state) == [
+            .satisfied, .actionRequired, .actionRequired, .actionRequired,
+        ],
+        "one failed check should keep its group pending even when the other check passes"
+    )
+    let groupedRequirements = mixed.groups.flatMap(\.requirements)
+    let originalByID = Dictionary(
+        uniqueKeysWithValues: mixed.requirements.map { ($0.id, $0) }
+    )
+    let groupedByID = Dictionary(
+        uniqueKeysWithValues: groupedRequirements.map { ($0.id, $0) }
+    )
+    expect(
+        groupedRequirements.count == mixed.requirements.count
+            && groupedByID == originalByID
+            && groupedRequirements.filter { $0.state == .actionRequired }.count == 3,
+        "grouping must retain all eight individual results and their failure details"
+    )
+    expect(
+        mixed.groups.flatMap(\.requirements)
+            .filter { $0.state == .actionRequired }
+            .allSatisfy { !$0.detail.isEmpty },
+        "each failed check must keep its individual explanation"
+    )
+
+    let refreshing = SetupPresenter.presentation(
+        for: SetupAssessment(issues: []),
+        isRefreshing: true
+    )
+    expect(
+        refreshing.groups.count == 4
+            && refreshing.groups.allSatisfy { $0.state == .checking },
+        "refresh should replace every previous group result with checking"
+    )
+}
+
+func setupWriteComponentsGroupDoesNotClaimMissingInstallForUnconfiguredTrust() {
+    let presentation = SetupPresenter.presentation(
+        for: positiveFSKitSetupReport(),
+        isRefreshing: false
+    )
+    guard let components = presentation.groups.first(where: { $0.id == .writeComponents }) else {
+        fatalError("CHECK FAILED: Setup should show the write components group")
+    }
+    expect(
+        components.state == .actionRequired
+            && components.requirements.map(\.id) == [.macFUSE, .ntfs3G]
+            && components.requirements.allSatisfy {
+                $0.statusText == "未配置" && !$0.title.contains("未安装")
+            },
+        "unconfigured trust reports should remain distinct from missing installed components"
+    )
+
+    let mixedEvidence = SetupPresenter.presentation(
+        for: SystemSetupReport(
+            facts: readySetupFacts(),
+            macFUSEEvidence: .notConfigured,
+            ntfs3GEvidence: .failedClosed(.invalidVersionCatalog),
+            authorizationStatus: .granted,
+            probeResult: SetupProbeResult(
+                fileSystemExtensionEnabled: true,
+                conflictScanComplete: true,
+                conflictingDriverIdentifiers: []
+            )
+        ),
+        isRefreshing: false
+    )
+    guard let mixedComponents = mixedEvidence.groups.first(where: { $0.id == .writeComponents }) else {
+        fatalError("CHECK FAILED: mixed write evidence should retain the components group")
+    }
+    expect(
+        mixedComponents.detail.contains("macFUSE 独立可信报告未配置")
+            && mixedComponents.detail.contains("NTFS-3G 可信校验未通过"),
+        "a collapsed group must expose both unconfigured trust and a separate failed trust check"
+    )
+}
+
+func setupUnknownFSKitElectionDoesNotClaimExtensionDisabled() {
+    let presentation = SetupPresenter.presentation(
+        for: SetupAssessment(issues: [.fileSystemExtensionDisabled]),
+        isRefreshing: false
+    )
+    guard let extensionRow = presentation.requirements.first(where: { $0.id == .fileSystemExtension }) else {
+        fatalError("CHECK FAILED: Setup should retain the FSKit extension check")
+    }
+    expect(
+        extensionRow.title.contains("确认")
+            && !extensionRow.detail.contains("尚未启用")
+            && extensionRow.detail.contains("帮助程序"),
+        "a missing PlugInKit use election cannot prove that a cross-team FSKit module is disabled"
+    )
+}
+
+func setupObservedConflictOutranksIncompleteScanInGroupedSummary() {
+    let presentation = SetupPresenter.presentation(
+        for: SetupAssessment(issues: [
+            .conflictScanIncomplete,
+            .conflictingDrivers(["known-driver-a", "known-driver-b"]),
+        ]),
+        isRefreshing: false
+    )
+    guard let group = presentation.groups.first(where: { $0.id == .otherChecks }),
+          let row = group.requirements.first(where: { $0.id == .conflictingDrivers })
+    else {
+        fatalError("CHECK FAILED: grouped Setup should retain the conflict check")
+    }
+    expect(
+        group.statusText == "发现冲突"
+            && group.detail.contains("2 个")
+            && group.detail.contains("扫描仍未完成")
+            && row.title == "停用冲突写入驱动"
+            && row.detail.contains("扫描仍未完成")
+            && !group.detail.contains("known-driver-a"),
+        "an observed conflict must remain visible in the collapsed group even when the scan is incomplete"
+    )
+}
+
+func setupUnknownFSKitFactsDoNotClaimAConfirmedConfigurationFailure() {
+    let presentation = SetupPresenter.presentation(
+        for: SetupAssessment(issues: [
+            .fileSystemExtensionDisabled,
+            .unsafeBackend(.unknown),
+        ]),
+        isRefreshing: false
+    )
+    let rows = Dictionary(
+        uniqueKeysWithValues: presentation.requirements.map { ($0.id, $0) }
+    )
+    expect(
+        rows[.fileSystemExtension]?.title.contains("确认") == true
+            && rows[.fileSystemExtension]?.detail.contains("不等于扩展未启用") == true
+            && rows[.backend]?.title == "确认 FSKit 后端"
+            && rows[.backend]?.detail.contains("无法确认") == true,
+        "unknown FSKit evidence should ask for verification without claiming the extension is disabled or a different backend is selected"
     )
 }
 
@@ -5538,6 +5728,14 @@ func setupPresentationNormalizesActionableFailuresWithoutLeakingDriverNames() {
     let presentation = SetupPresenter.presentation(for: assessment, isRefreshing: false)
     let rows = Dictionary(uniqueKeysWithValues: presentation.requirements.map { ($0.id, $0) })
 
+    expect(presentation.title == "只读环境检查有待确认", "issues should not look like unfinished onboarding")
+    expect(
+        presentation.detail.contains("按类别查看")
+            && !presentation.detail.contains("8 项")
+            && presentation.detail.contains("帮助程序")
+            && !presentation.detail.contains("写入保持关闭"),
+        "the grouped read-only check should avoid a misleading count of user tasks"
+    )
     expect(!presentation.isReady, "any setup issue should keep setup presentation unready")
     expect(!presentation.isBusy, "settled setup failures should not be busy")
     expect(
@@ -5610,14 +5808,15 @@ func setupPresentationFailsClosedWhileRefreshing() {
         isRefreshing: true
     )
 
-    expect(presentation.title == "正在检查运行环境", "refresh should replace the old result title")
+    expect(presentation.title == "正在进行只读环境检查", "refresh should replace the old result title")
     expect(!presentation.isReady, "refresh must not reuse an old ready result")
     expect(presentation.isBusy, "refresh should expose its busy state")
     expect(presentation.primaryAction == nil, "refresh should hide the primary action")
     expect(presentation.secondaryActions.isEmpty, "refresh should hide all secondary actions")
     expect(
-        presentation.detail.contains("写入保持关闭"),
-        "refresh should explicitly say that writing stays disabled"
+        presentation.detail.contains("只读取系统状态")
+            && !presentation.detail.contains("写入保持关闭"),
+        "refresh should describe read-only observation without claiming a write lock"
     )
     expect(presentation.requirements.count == 8, "refresh should preserve the stable eight-row shape")
     expect(
@@ -5631,10 +5830,38 @@ func setupPresentationFailsClosedWhileRefreshing() {
     )
 }
 
+func setupPresentationKeepsUnknownFactsAsCheckResults() {
+    for authorization in [SetupAuthorizationStatus.unknown, .granted] {
+        let presentation = SetupPresenter.presentation(
+            for: SetupAssessment(issues: [.requiredAuthorizationUnavailable(authorization)]),
+            isRefreshing: false
+        )
+        let detail = presentation.requirements.first { $0.id == .authorization }?.detail ?? ""
+        expect(
+            !detail.contains("写入保持关闭") && !detail.isEmpty,
+            "an unverified authorization row must explain the check without claiming a helper lock"
+        )
+    }
+
+    let conflict = SetupPresenter.presentation(
+        for: SetupAssessment(issues: [.conflictScanIncomplete]),
+        isRefreshing: false
+    )
+    let detail = conflict.requirements.first { $0.id == .conflictingDrivers }?.detail ?? ""
+    expect(
+        detail.contains("扫描") && !detail.contains("保持只读"),
+        "an incomplete read-only conflict scan must not claim a global write restriction"
+    )
+}
+
 func readOnlySetupGuideLeadsToRecheckAndReportsCompletion() {
     let incomplete = SetupPresenter.presentation(
         for: SetupAssessment(issues: [.macFUSEMissing]),
         isRefreshing: false
+    )
+    expect(
+        ReadOnlySetupInteractionPresenter.guideGroup(for: incomplete)?.id == .writeComponents,
+        "continue setup should expand the group containing the first pending check"
     )
     expect(
         ReadOnlySetupInteractionPresenter.primaryAction(
@@ -5668,14 +5895,18 @@ func readOnlySetupGuideLeadsToRecheckAndReportsCompletion() {
         isRefreshing: false
     )
     expect(
+        ReadOnlySetupInteractionPresenter.guideGroup(for: ready) == nil,
+        "ready setup should not offer a guide group"
+    )
+    expect(
         ReadOnlySetupInteractionPresenter.completedRecheckStatus(for: ready)
             == "重新检查完成，运行环境已满足当前要求。",
         "a successful recheck should report a precise ready result"
     )
     expect(
         ReadOnlySetupInteractionPresenter.completedRecheckStatus(for: incomplete)
-            == "重新检查完成，仍有 1 项需要处理。",
-        "an incomplete recheck should report the remaining actionable count"
+            == "重新检查完成，仍有 1 类检查待确认。",
+        "an incomplete recheck should report pending groups instead of user tasks"
     )
 }
 
@@ -5691,11 +5922,13 @@ func readOnlySetupFeedbackUsesStableVisibleAndAccessibleText() {
 
     let cases: [(ReadOnlyActionFeedback, String)] = [
         (
-            ReadOnlySetupInteractionPresenter.guideFeedback(requirementID: .macFUSE),
-            "已展开首个待处理项目。"
+            ReadOnlySetupInteractionPresenter.guideFeedback(
+                group: ReadOnlySetupInteractionPresenter.guideGroup(for: incomplete)
+            ),
+            "已展开“写入组件”；请查看其中的待确认检查。"
         ),
         (
-            ReadOnlySetupInteractionPresenter.guideFeedback(requirementID: nil),
+            ReadOnlySetupInteractionPresenter.guideFeedback(group: nil),
             "当前没有可继续的设置步骤，请重新检查。"
         ),
         (
@@ -5708,7 +5941,7 @@ func readOnlySetupFeedbackUsesStableVisibleAndAccessibleText() {
         ),
         (
             ReadOnlySetupInteractionPresenter.completedRecheckFeedback(for: incomplete),
-            "重新检查完成，仍有 1 项需要处理。"
+            "重新检查完成，仍有 1 类检查待确认。"
         ),
     ]
 
@@ -5879,7 +6112,11 @@ func unknownExternalNTFSIsVisibleOnlyAsAReadOnlyCandidate() {
         fileSystemName: "ntfs",
         isInternal: false,
         roleEvidence: .unknown,
-        diskArbitrationMountPoint: "/Volumes/TRANSFER"
+        diskArbitrationMountPoint: "/Volumes/TRANSFER",
+        mediaUUID: "73000000-0000-0000-0000-000000000002",
+        mediaContent: "Windows_NTFS",
+        mediaContentHint: "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7",
+        mediaRegistryID: 731
     )
     let record = ReadOnlyVolumeMapper.map(
         evidence,
@@ -5936,7 +6173,9 @@ func unknownExternalNTFSIsVisibleOnlyAsAReadOnlyCandidate() {
                     volumeUUID: nil,
                     volumeName: nil,
                     fileSystemName: nil,
-                    mountPoint: nil
+                    mountPoint: nil,
+                    mediaContent: "GUID_partition_scheme",
+                    mediaRegistryID: 730
                 ),
                 volumes: [record],
                 issues: []
@@ -5952,7 +6191,8 @@ func unknownExternalNTFSIsVisibleOnlyAsAReadOnlyCandidate() {
     let dashboard = ReadOnlyDashboardPresenter.presentation(
         for: observation,
         setupAssessment: SetupChecker.assess(readySetupFacts()),
-        isSetupRefreshing: false
+        isSetupRefreshing: false,
+        setupReport: positiveFSKitSetupReport()
     )
     expect(
         dashboard.phase == .limited && dashboard.volumes.count == 1,
@@ -5966,8 +6206,11 @@ func unknownExternalNTFSIsVisibleOnlyAsAReadOnlyCandidate() {
         "the candidate presentation must explain its unconfirmed purpose in plain text"
     )
     expect(
-        !dashboard.writeControlsAvailable,
-        "candidate visibility must not enable any mutation control"
+        dashboard.writeControlsAvailable
+            && dashboard.volumes[0].actions.canEnableWriting
+            && dashboard.volumes[0].actions.requiresDataDeclaration
+            && !dashboard.volumes[0].actions.canSafeEject,
+        "an unknown-role candidate may request one-time declaration but cannot eject"
     )
 }
 
@@ -7210,6 +7453,15 @@ func liveMountTableReaderProducesReadOnlyFacts() {
         },
         "every copied mount record should preserve source, target, filesystem, and access"
     )
+}
+
+func systemMountTableRejectsCountsThatChangeDuringCopy() {
+    expect(SystemMountTableSnapshotPolicy.isComplete(
+        initialCount: 3, copiedCount: 3, countAfterRead: 3, capacity: 11
+    ), "matching mount-table counts may form one complete read")
+    expect(!SystemMountTableSnapshotPolicy.isComplete(
+        initialCount: 3, copiedCount: 4, countAfterRead: 4, capacity: 11
+    ), "a mount added between the first count and copy must invalidate the read")
 }
 
 func mountTableReaderRequiresTwoConsecutiveStableSnapshots() {
@@ -10914,8 +11166,27 @@ func setupPresentationDistinguishesUnconfiguredAndRejectedTrustEvidence() {
         "an unconfigured trust policy must not be presented as a confirmed missing install"
     )
     expect(
+        unconfigured.title.contains("独立可信报告未配置")
+            && unconfigured.detail.contains("帮助程序")
+            && unconfigured.detail.contains("另行核验")
+            && !unconfigured.detail.contains("必须更新应用")
+            && unconfiguredRows[.macFUSE]?.statusText == "未配置"
+            && unconfiguredRows[.ntfs3G]?.statusText == "未配置",
+        "missing read-only trust reports must not imply that helper-verified writing is permanently unavailable"
+    )
+    expect(
+        unconfigured.primaryAction == .recheck
+            && unconfigured.secondaryActions == [.copyDiagnostics],
+        "an unconfigured report must preserve recheck without an impossible Continue Setup loop"
+    )
+    expect(
         unconfiguredRows[.ntfs3G]?.detail.contains("尚未配置受信任校验策略") == true,
         "an unconfigured NTFS-3G policy must remain distinguishable"
+    )
+    expect(
+        unconfiguredRows[.macFUSE]?.detail.contains("写入保持关闭") == false
+            && unconfiguredRows[.ntfs3G]?.detail.contains("写入保持关闭") == false,
+        "an unconfigured display policy must not claim to lock helper writes"
     )
 
     let rejected = SetupPresenter.presentation(
@@ -10936,8 +11207,17 @@ func setupPresentationDistinguishesUnconfiguredAndRejectedTrustEvidence() {
         "a rejected macFUSE artifact should expose a fixed non-sensitive failure code"
     )
     expect(
+        rejected.primaryAction == .continueSetup,
+        "configured but rejected artifacts should retain a user-facing remediation path"
+    )
+    expect(
         rejectedRows[.ntfs3G]?.detail.contains("NTFS3G_VERSION_CATALOG") == true,
         "a rejected NTFS-3G catalog should expose a fixed non-sensitive failure code"
+    )
+    expect(
+        rejectedRows[.macFUSE]?.detail.contains("写入保持关闭") == false
+            && rejectedRows[.ntfs3G]?.detail.contains("写入保持关闭") == false,
+        "a rejected display check must not claim to lock helper writes"
     )
 
     let unapprovedVersion = SetupPresenter.presentation(
@@ -10975,6 +11255,19 @@ func setupPresentationDistinguishesUnconfiguredAndRejectedTrustEvidence() {
     )
 }
 
+func helperEnablementUIRequiresTheExpectedProtectedInstallLocation() {
+    let buildCopy = URL(fileURLWithPath: "/Users/example/project/.build/NTFSLite.app")
+    let lookalike = URL(fileURLWithPath: "/Library/PrivilegedHelperTools/NTFSLite-copy.app")
+    let expected = URL(fileURLWithPath: "/Library/PrivilegedHelperTools/NTFSLite.app")
+    expect(!HelperEnablementUI.shouldOfferRegistration(for: buildCopy)
+        && !HelperEnablementUI.shouldOfferRegistration(for: lookalike)
+        && HelperEnablementUI.shouldOfferRegistration(for: expected),
+        "the build copy must not offer helper registration; this path hint is not a security authorization")
+}
+
+helperEnablementUIRequiresTheExpectedProtectedInstallLocation()
+print("PASS: helper enablement UI requires the expected protected install location")
+
 func setupReportContradictionsFailClosedAcrossPresentationAndFacts() {
     let report = SystemSetupReport(
         facts: readySetupFacts(),
@@ -10997,12 +11290,13 @@ func setupReportContradictionsFailClosedAcrossPresentationAndFacts() {
         "contradictory typed Setup evidence must reconcile to failed-closed facts"
     )
     expect(
-        !presentation.isReady && presentation.title == "首次设置未完成",
-        "contradictory Setup evidence must never retain a ready title"
+        !presentation.isReady && presentation.title.contains("独立可信报告未配置"),
+        "contradictory Setup evidence must name the missing read-only trust report rather than appear ready"
     )
     expect(
-        presentation.primaryAction == .continueSetup,
-        "a contradictory Setup report must expose remediation rather than a ready recheck state"
+        presentation.primaryAction == .recheck
+            && presentation.secondaryActions == [.copyDiagnostics],
+        "a report with an unconfigured trust policy must retain recheck without an impossible Continue Setup loop"
     )
     expect(
         rows[.macFUSE]?.state == .actionRequired
@@ -11135,7 +11429,7 @@ func cancellingSetupProbeStillConfirmsTheDirectProcessStops() async {
     )
 }
 
-func readOnlyDashboardNeverExposesMutationControlsOrRawIdentifiers() {
+func formalDashboardExposesOnlySafeRequestsAndKeepsRawIdentifiersPrivate() {
     let snapshot = makeSnapshot(
         uuid: "SECRET-VOLUME-UUID",
         bsdName: "disk99s7",
@@ -11152,7 +11446,11 @@ func readOnlyDashboardNeverExposesMutationControlsOrRawIdentifiers() {
         fileSystemName: "ntfs",
         isInternal: false,
         roleEvidence: .trustedData,
-        diskArbitrationMountPoint: "/Volumes/PERSONAL"
+        diskArbitrationMountPoint: "/Volumes/PERSONAL",
+        mediaUUID: "99000000-0000-0000-0000-000000000007",
+        mediaContent: "Windows_NTFS",
+        mediaContentHint: "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7",
+        mediaRegistryID: 9907
     )
     let record = ReadOnlyVolumeRecord(
         evidence: evidence,
@@ -11176,7 +11474,9 @@ func readOnlyDashboardNeverExposesMutationControlsOrRawIdentifiers() {
                     volumeUUID: nil,
                     volumeName: nil,
                     fileSystemName: nil,
-                    mountPoint: nil
+                    mountPoint: nil,
+                    mediaContent: "GUID_partition_scheme",
+                    mediaRegistryID: 9900
                 ),
                 volumes: [record],
                 issues: []
@@ -11188,7 +11488,8 @@ func readOnlyDashboardNeverExposesMutationControlsOrRawIdentifiers() {
     let dashboard = ReadOnlyDashboardPresenter.presentation(
         for: observation,
         setupAssessment: SetupChecker.assess(readySetupFacts()),
-        isSetupRefreshing: false
+        isSetupRefreshing: false,
+        setupReport: positiveFSKitSetupReport()
     )
 
     expect(dashboard.phase == .settled, "complete evidence should produce a settled dashboard")
@@ -11204,12 +11505,12 @@ func readOnlyDashboardNeverExposesMutationControlsOrRawIdentifiers() {
     )
     expect(dashboard.volumes[0].title == "PERSONAL", "the user-facing volume name should be shown")
     expect(dashboard.volumes[0].accessText == "只读", "the actual mount access should be explicit")
-    expect(!dashboard.writeControlsAvailable, "the observation-only app must never expose write controls")
+    expect(dashboard.writeControlsAvailable, "the verified data-volume request should be available")
 
     let renderedText = ([dashboard.title, dashboard.detail]
         + dashboard.volumes.flatMap { [$0.title, $0.detail, $0.accessText] })
         .joined(separator: " ")
-    for secret in ["SECRET-VOLUME-UUID", "SECRET-MEDIA-UUID", "disk99", "/Volumes/PERSONAL"] {
+    for secret in ["SECRET-VOLUME-UUID", "SECRET-MEDIA-UUID", "99000000-0000-0000-0000-000000000007", "disk99", "/Volumes/PERSONAL"] {
         expect(!renderedText.contains(secret), "dashboard text must not leak raw identifier \(secret)")
     }
 
@@ -11247,6 +11548,680 @@ func readOnlyDashboardNeverExposesMutationControlsOrRawIdentifiers() {
         !partiallyConfirmed.writeControlsAvailable,
         "showing a confirmed volume under partial evidence must not enable mutations"
     )
+}
+
+func formalDashboardOffersWriteRequestForVerifiedExternalDataVolume() {
+    let snapshot = makeSnapshot(
+        uuid: "92000000-0000-0000-0000-000000000001",
+        bsdName: "disk92s1",
+        displayName: "DATA",
+        physicalDiskID: PhysicalDiskID(rawValue: "disk92"),
+        mediaGeneration: MediaGeneration(rawValue: 92),
+        mountAccess: .readOnly
+    )
+    let record = ReadOnlyVolumeRecord(
+        evidence: ReadOnlyVolumeEvidence(
+            bsdName: "disk92s1", volumeUUID: snapshot.id.uuid,
+            physicalDiskBSDName: "disk92", displayName: "DATA",
+            fileSystemName: "ntfs", isInternal: false,
+            roleEvidence: .trustedData,
+            diskArbitrationMountPoint: "/Volumes/DATA",
+            mediaUUID: "92000000-0000-0000-0000-000000000101",
+            mediaContent: "Windows_NTFS",
+            mediaContentHint: "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7",
+            mediaRegistryID: 9201
+        ),
+        snapshot: snapshot,
+        mountObservation: nil,
+        issues: []
+    )
+    let observation = DiskInventoryObservation(
+        physicalDisks: [ReadOnlyPhysicalDiskRecord(
+            instanceID: snapshot.diskInstanceID,
+            description: DiskArbitrationDescription(
+                bsdName: "disk92", physicalDiskBSDName: "disk92",
+                isWholeDisk: true, isInternal: false,
+                isEjectable: true, isRemovable: true,
+                mediaSize: 1_000_000, mediaUUID: nil,
+                volumeUUID: nil, volumeName: nil,
+                fileSystemName: nil, mountPoint: nil,
+                mediaContent: "GUID_partition_scheme",
+                mediaRegistryID: 9200
+            ),
+            volumes: [record], issues: []
+        )],
+        issues: []
+    )
+    let dashboard = ReadOnlyDashboardPresenter.presentation(
+        for: observation,
+        setupAssessment: SetupAssessment(issues: []),
+        isSetupRefreshing: false,
+        setupReport: positiveFSKitSetupReport()
+    )
+    expect(
+        dashboard.writeControlsAvailable && dashboard.volumes[0].actions.canEnableWriting,
+        "a fully observed external data volume must expose the explicit write request"
+    )
+    expect(dashboard.detail.contains("有限实物验证")
+        && dashboard.detail.contains("重新核对")
+        && !dashboard.detail.contains("尚未开放"),
+        "the formal dashboard must explain the limited validation and fresh helper check")
+}
+
+func formalDashboardOffersDeclarationRequestWithoutCandidateEject() {
+    let mapped = ReadOnlyVolumeMapper.map(
+        ReadOnlyVolumeEvidence(
+            bsdName: "disk93s1", volumeUUID: "93000000-0000-0000-0000-000000000001",
+            physicalDiskBSDName: "disk93", displayName: "UNCLASSIFIED",
+            fileSystemName: "ntfs", isInternal: false,
+            roleEvidence: .unknown,
+            diskArbitrationMountPoint: "/Volumes/UNCLASSIFIED",
+            mediaUUID: "93000000-0000-0000-0000-000000000101",
+            mediaContent: "Windows_NTFS",
+            mediaContentHint: "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7",
+            mediaRegistryID: 9301
+        ),
+        mount: ReadOnlyMountEvidence(
+            sourceBSDName: "disk93s1", mountPoint: "/Volumes/UNCLASSIFIED",
+            access: .readOnly, backend: .unknown, isComplete: true,
+            isCanonical: true, isSymlink: false
+        ),
+        mediaGeneration: MediaGeneration(rawValue: 93)
+    )
+    expect(mapped.candidate != nil && mapped.snapshot == nil,
+           "the fixture must keep an unknown-role candidate outside trusted snapshots")
+    let candidate = mapped.candidate!
+    let dashboard = ReadOnlyDashboardPresenter.presentation(
+        for: DiskInventoryObservation(
+            physicalDisks: [ReadOnlyPhysicalDiskRecord(
+                instanceID: candidate.diskInstanceID,
+                description: DiskArbitrationDescription(
+                    bsdName: "disk93", physicalDiskBSDName: "disk93",
+                    isWholeDisk: true, isInternal: false,
+                    isEjectable: true, isRemovable: true,
+                    mediaSize: 1_000_000, mediaUUID: nil,
+                    volumeUUID: nil, volumeName: nil,
+                    fileSystemName: nil, mountPoint: nil,
+                    mediaContent: "GUID_partition_scheme",
+                    mediaRegistryID: 9300
+                ),
+                volumes: [mapped], issues: []
+            )],
+            issues: []
+        ),
+        setupAssessment: SetupAssessment(issues: []),
+        isSetupRefreshing: false,
+        setupReport: positiveFSKitSetupReport()
+    )
+    expect(dashboard.phase == .limited,
+           "unknown-role candidates may leave the aggregate observation incomplete")
+    expect(dashboard.detail.contains("声明")
+        && !dashboard.detail.contains("所有变更操作继续关闭"),
+        "candidate overview text must not contradict its declaration request entrance")
+    expect(dashboard.volumes.count == 1,
+           "the candidate must remain visible to request a declaration")
+    let actions = dashboard.volumes[0].actions
+    expect(actions.canEnableWriting && actions.requiresDataDeclaration,
+           "a read-only candidate may request this operation only through a one-time declaration")
+    expect(!actions.canSafeEject && actions.ejectReason.contains("用途"),
+           "a candidate must not gain whole-disk eject authority from the declaration path")
+}
+
+func formalActionPresentation(
+    target: ReadOnlyVolumeRecord,
+    siblings: [ReadOnlyVolumeRecord] = [],
+    diskInstanceID: DiskInstanceID? = nil,
+    diskInternal: Bool? = false,
+    ejectable: Bool? = true,
+    removable: Bool? = true,
+    diskRegistryID: UInt64? = 9400,
+    diskIssues: [DiskInventoryIssue] = [],
+    observationIssues: [DiskInventoryIssue] = [],
+    setupAssessment: SetupAssessment = SetupAssessment(issues: []),
+    isSetupRefreshing: Bool = false,
+    setupReport: SystemSetupReport? = positiveFSKitSetupReport()
+) -> ReadOnlyVolumePresentation {
+    let targetID = target.snapshot?.instanceID ?? target.candidate!.instanceID
+    let diskID = diskInstanceID ?? targetID.diskInstanceID
+    let bsdName = diskID.physicalDiskID.rawValue
+    let observation = DiskInventoryObservation(
+        physicalDisks: [ReadOnlyPhysicalDiskRecord(
+            instanceID: diskID,
+            description: DiskArbitrationDescription(
+                bsdName: bsdName, physicalDiskBSDName: bsdName,
+                isWholeDisk: true, isInternal: diskInternal,
+                isEjectable: ejectable, isRemovable: removable,
+                mediaSize: 1_000_000, mediaUUID: nil,
+                volumeUUID: nil, volumeName: nil,
+                fileSystemName: nil, mountPoint: nil,
+                mediaContent: "GUID_partition_scheme",
+                mediaRegistryID: diskRegistryID
+            ),
+            volumes: [target] + siblings, issues: diskIssues
+        )],
+        issues: observationIssues
+    )
+    let dashboard = ReadOnlyDashboardPresenter.presentation(
+        for: observation,
+        setupAssessment: setupAssessment,
+        isSetupRefreshing: isSetupRefreshing,
+        setupReport: setupReport
+    )
+    guard let volume = dashboard.volumes.first(where: { $0.id == targetID }) else {
+        fatalError("CHECK FAILED: action fixture target must remain displayable")
+    }
+    return volume
+}
+
+func formalActionPolicyFailsClosedForPhysicalAndSiblingHazards() {
+    let snapshot = makeSnapshot(
+        uuid: "94000000-0000-0000-0000-000000000001",
+        bsdName: "disk94s1", displayName: "DATA",
+        physicalDiskID: PhysicalDiskID(rawValue: "disk94"),
+        mediaGeneration: MediaGeneration(rawValue: 94),
+        mountAccess: .readOnly
+    )
+    let target = ReadOnlyVolumeRecord(
+        evidence: ReadOnlyVolumeEvidence(
+            bsdName: "disk94s1", volumeUUID: snapshot.id.uuid,
+            physicalDiskBSDName: "disk94", displayName: "DATA",
+            fileSystemName: "ntfs", isInternal: false,
+            roleEvidence: .trustedData, diskArbitrationMountPoint: "/Volumes/DATA",
+            mediaUUID: "94000000-0000-0000-0000-000000000101",
+            mediaContent: "Windows_NTFS",
+            mediaContentHint: "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7",
+            mediaRegistryID: 9401
+        ),
+        snapshot: snapshot, mountObservation: nil, issues: []
+    )
+
+    func targetWithPartitionFacts(
+        bsdName: String = "disk94s1",
+        hint: String? = "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7",
+        mediaUUID: String? = "94000000-0000-0000-0000-000000000101",
+        registryID: UInt64? = 9401,
+        content: String? = "Windows_NTFS"
+    ) -> ReadOnlyVolumeRecord {
+        ReadOnlyVolumeRecord(
+            evidence: ReadOnlyVolumeEvidence(
+                bsdName: bsdName, volumeUUID: snapshot.id.uuid,
+                physicalDiskBSDName: "disk94", displayName: "DATA",
+                fileSystemName: "ntfs", isInternal: false,
+                roleEvidence: .trustedData,
+                diskArbitrationMountPoint: "/Volumes/DATA",
+                mediaUUID: mediaUUID, mediaContent: content,
+                mediaContentHint: hint, mediaRegistryID: registryID
+            ),
+            snapshot: snapshot, mountObservation: nil, issues: []
+        )
+    }
+    for (name, record) in [
+        ("DA content alone", targetWithPartitionFacts(hint: nil, content: "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7")),
+        ("missing DA content", targetWithPartitionFacts(content: nil)),
+        ("contradictory DA content", targetWithPartitionFacts(content: "Apple_APFS")),
+        ("EFI partition content", targetWithPartitionFacts(content: "C12A7328-F81F-11D2-BA4B-00A0C93EC93B")),
+        ("wrong partition type", targetWithPartitionFacts(hint: "C12A7328-F81F-11D2-BA4B-00A0C93EC93B")),
+        ("wrong partition BSD identity", targetWithPartitionFacts(bsdName: "disk94s9")),
+        ("missing partition UUID", targetWithPartitionFacts(mediaUUID: nil)),
+        ("missing partition registry ID", targetWithPartitionFacts(registryID: nil))
+    ] {
+        let actions = formalActionPresentation(target: record).actions
+        expect(!actions.canEnableWriting && !actions.canSafeEject,
+               "\(name) must close an NTFS target that cannot bind to helper v2")
+    }
+    let basicDataContent = formalActionPresentation(
+        target: targetWithPartitionFacts(content: "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7")
+    ).actions
+    expect(basicDataContent.canEnableWriting && basicDataContent.canSafeEject,
+           "an unchanged GPT Basic Data content should remain eligible with a matching immutable hint")
+    let extensionChecking = formalActionPresentation(
+        target: target, isSetupRefreshing: true
+    ).actions
+    expect(extensionChecking.canEnableWriting && extensionChecking.canSafeEject,
+        "an in-progress read-only Setup probe must not hide a disk-qualified helper request")
+    let noSetupReport = formalActionPresentation(
+        target: target, setupReport: nil
+    ).actions
+    expect(noSetupReport.canEnableWriting && noSetupReport.canSafeEject,
+        "an absent read-only Setup report must leave disk-qualified helper requests available")
+    let extensionDisabled = formalActionPresentation(
+        target: target,
+        setupAssessment: SetupAssessment(issues: [.fileSystemExtensionDisabled]),
+        setupReport: SystemSetupReport(
+            facts: readySetupFacts(),
+            macFUSEEvidence: .notConfigured,
+            ntfs3GEvidence: .notConfigured,
+            authorizationStatus: .granted,
+            probeResult: SetupProbeResult(
+                fileSystemExtensionEnabled: false,
+                conflictScanComplete: true,
+                conflictingDriverIdentifiers: []
+            )
+        )
+    ).actions
+    expect(extensionDisabled.canEnableWriting && extensionDisabled.canSafeEject,
+        "a read-only extension probe cannot decide helper runtime capability before preflight")
+    let reportWithoutExtension = SystemSetupReport(
+        facts: readySetupFacts(),
+        macFUSEEvidence: .notConfigured,
+        ntfs3GEvidence: .notConfigured,
+        authorizationStatus: .granted,
+        probeResult: SetupProbeResult(
+            fileSystemExtensionEnabled: false,
+            conflictScanComplete: true,
+            conflictingDriverIdentifiers: []
+        )
+    )
+    let reportWithoutPositiveProbe = formalActionPresentation(
+        target: target,
+        setupAssessment: SetupAssessment(issues: []),
+        setupReport: reportWithoutExtension
+    ).actions
+    expect(reportWithoutPositiveProbe.canEnableWriting && reportWithoutPositiveProbe.canSafeEject,
+           "a typed negative read-only probe must not replace helper preflight for an eligible disk")
+    let reportWithExtension = SystemSetupReport(
+        facts: readySetupFacts(),
+        macFUSEEvidence: .notConfigured,
+        ntfs3GEvidence: .notConfigured,
+        authorizationStatus: .granted,
+        probeResult: SetupProbeResult(
+            fileSystemExtensionEnabled: true,
+            conflictScanComplete: true,
+            conflictingDriverIdentifiers: []
+        )
+    )
+    let extensionConfirmed = formalActionPresentation(
+        target: target,
+        setupAssessment: SetupChecker.assess(reportWithExtension.reconciledFacts),
+        setupReport: reportWithExtension
+    ).actions
+    expect(extensionConfirmed.canEnableWriting && extensionConfirmed.canSafeEject,
+           "a positive FSKit probe must allow the helper request despite missing independent trust reports")
+    let missingWholeRegistry = formalActionPresentation(
+        target: target, diskRegistryID: nil
+    ).actions
+    expect(!missingWholeRegistry.canEnableWriting && !missingWholeRegistry.canSafeEject,
+           "a missing whole-disk registry ID must close both helper entrances")
+    let duplicateTarget = formalActionPresentation(
+        target: target, siblings: [target]
+    ).actions
+    expect(!duplicateTarget.canEnableWriting && !duplicateTarget.canSafeEject,
+           "duplicate records for the same target instance must close both helper entrances")
+    let protectedSibling = ReadOnlyVolumeRecord(
+        evidence: ReadOnlyVolumeEvidence(
+            bsdName: "disk94s2", volumeUUID: nil,
+            physicalDiskBSDName: "disk94", displayName: "SYSTEM",
+            fileSystemName: "ntfs", isInternal: true,
+            roleEvidence: .protected, diskArbitrationMountPoint: nil
+        ),
+        snapshot: nil, mountObservation: nil, issues: [.missingVolumeUUID]
+    )
+
+    let globalIssue = formalActionPresentation(
+        target: target, observationIssues: [.mountTableReadFailed]
+    ).actions
+    expect(!globalIssue.canEnableWriting && !globalIssue.canSafeEject
+        && globalIssue.writeReason.contains("系统挂载表")
+        && globalIssue.ejectReason.contains("系统挂载表"),
+        "global observation issues must close both entrances with an explanation")
+
+    let diskIssue = formalActionPresentation(
+        target: target, diskIssues: [.missingEjectability(bsdName: "disk94")]
+    ).actions
+    expect(!diskIssue.canEnableWriting && !diskIssue.canSafeEject
+        && diskIssue.writeReason.contains("物理磁盘推出能力"),
+        "disk-level inconsistencies must close both entrances")
+
+    let missingSafety = formalActionPresentation(
+        target: target, ejectable: nil
+    ).actions
+    expect(!missingSafety.canEnableWriting && !missingSafety.canSafeEject
+        && missingSafety.writeReason.contains("推出能力"),
+        "missing physical safety facts must never be interpreted as ejectability")
+
+    let notEjectable = formalActionPresentation(
+        target: target, ejectable: false
+    ).actions
+    expect(!notEjectable.canEnableWriting && !notEjectable.canSafeEject
+        && notEjectable.ejectReason.contains("不支持"),
+        "an explicitly non-ejectable disk cannot offer a disk operation")
+
+    let protected = formalActionPresentation(
+        target: target, siblings: [protectedSibling]
+    ).actions
+    expect(!protected.canEnableWriting && !protected.canSafeEject
+        && protected.ejectReason.contains("受保护"),
+        "a known protected sibling must block the whole-disk action")
+
+    let unknownNTFSSibling = ReadOnlyVolumeMapper.map(
+        ReadOnlyVolumeEvidence(
+            bsdName: "disk94s3", volumeUUID: "94000000-0000-0000-0000-000000000003",
+            physicalDiskBSDName: "disk94", displayName: "UNKNOWN",
+            fileSystemName: "ntfs", isInternal: false,
+            roleEvidence: .unknown, diskArbitrationMountPoint: nil,
+            mediaUUID: "94000000-0000-0000-0000-000000000103",
+            mediaContent: "Windows_NTFS",
+            mediaContentHint: "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7",
+            mediaRegistryID: 9403
+        ),
+        mount: nil, mediaGeneration: snapshot.mediaGeneration
+    )
+    let unknownSibling = formalActionPresentation(
+        target: target, siblings: [unknownNTFSSibling]
+    ).actions
+    expect(!unknownSibling.canEnableWriting && !unknownSibling.canSafeEject
+        && unknownSibling.ejectReason.contains("用途"),
+        "an unknown-purpose NTFS sibling must not be swept into a whole-disk operation")
+
+    func sessionObservation(
+        target: ReadOnlyVolumeRecord,
+        siblings: [ReadOnlyVolumeRecord] = [],
+        issues: [DiskInventoryIssue] = []
+    ) -> DiskInventoryObservation {
+        DiskInventoryObservation(
+            physicalDisks: [ReadOnlyPhysicalDiskRecord(
+                instanceID: snapshot.instanceID.diskInstanceID,
+                description: DiskArbitrationDescription(
+                    bsdName: "disk94", physicalDiskBSDName: "disk94",
+                    isWholeDisk: true, isInternal: false,
+                    isEjectable: true, isRemovable: true,
+                    mediaSize: 1_000_000, mediaUUID: nil,
+                    volumeUUID: nil, volumeName: nil,
+                    fileSystemName: nil, mountPoint: nil,
+                    mediaContent: "GUID_partition_scheme",
+                    mediaRegistryID: 9400
+                ),
+                volumes: [target] + siblings, issues: issues
+    )],
+        issues: []
+    )
+}
+    let sessionCandidate = unknownNTFSSibling
+    let sessionTargetID = sessionCandidate.candidate!.instanceID
+    expect(ReadOnlyDashboardPresenter.canOfferSessionEject(
+        sessionTargetID, in: sessionObservation(target: sessionCandidate)
+    ), "a completed session may offer whole-disk eject for its current candidate after fresh disk checks")
+    expect(!ReadOnlyDashboardPresenter.canOfferSessionEject(
+        sessionTargetID, in: sessionObservation(target: sessionCandidate, siblings: [protectedSibling])
+    ), "a protected sibling must revoke a previous session eject entrance")
+    expect(!ReadOnlyDashboardPresenter.canOfferSessionEject(
+        sessionTargetID,
+        in: sessionObservation(target: sessionCandidate, issues: [.missingRemovability(bsdName: "disk94")])
+    ), "a disk safety issue must revoke a previous session eject entrance")
+
+    let incompleteDataSibling = ReadOnlyVolumeMapper.map(
+        ReadOnlyVolumeEvidence(
+            bsdName: "disk94s4", volumeUUID: nil,
+            physicalDiskBSDName: "disk94", displayName: "PARTIAL",
+            fileSystemName: "ntfs", isInternal: false,
+            roleEvidence: .trustedData, diskArbitrationMountPoint: nil
+        ),
+        mount: nil, mediaGeneration: snapshot.mediaGeneration
+    )
+    let incompleteSibling = formalActionPresentation(
+        target: target, siblings: [incompleteDataSibling]
+    ).actions
+    expect(!incompleteSibling.canEnableWriting && !incompleteSibling.canSafeEject,
+           "an NTFS sibling with an incomplete identity must close whole-disk actions")
+    expect(!ReadOnlyDashboardPresenter.canOfferSessionEject(
+        sessionTargetID, in: sessionObservation(target: sessionCandidate, siblings: [incompleteDataSibling])
+    ), "an incomplete sibling must revoke a previous session eject entrance")
+
+    let incompleteOtherSibling = ReadOnlyVolumeMapper.map(
+        ReadOnlyVolumeEvidence(
+            bsdName: "disk94s5", volumeUUID: nil,
+            physicalDiskBSDName: "disk94", displayName: "OTHER",
+            fileSystemName: "msdos", isInternal: false,
+            roleEvidence: .unknown, diskArbitrationMountPoint: nil
+        ),
+        mount: nil, mediaGeneration: snapshot.mediaGeneration
+    )
+    let incompleteOther = formalActionPresentation(
+        target: target, siblings: [incompleteOtherSibling]
+    ).actions
+    expect(!incompleteOther.canEnableWriting && !incompleteOther.canSafeEject,
+           "an incompletely identified non-NTFS sibling must also close whole-disk actions")
+
+    // A GPT EFI partition has no ordinary volume identity when unmounted. Its
+    // immutable IOMedia type and entry identity may explain that gap to the UI,
+    // without making the aggregate observation a mutation snapshot.
+    let efiType = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
+    let efiMediaUUID = "94000000-0000-0000-0000-000000000006"
+    func efiRecord(
+        bsdName: String = "disk94s6",
+        content: String? = efiType,
+        hint: String? = efiType,
+        fileSystemName: String? = "msdos",
+        mediaUUID: String? = efiMediaUUID,
+        registryID: UInt64? = 9406,
+        parent: String? = "disk94",
+        mountPoint: String? = nil,
+        extraIssue: ReadOnlyObservationIssue? = nil
+    ) -> ReadOnlyVolumeRecord {
+        let description = DiskArbitrationDescription(
+            bsdName: bsdName, physicalDiskBSDName: parent,
+            isWholeDisk: false, isInternal: false,
+            isEjectable: true, isRemovable: true,
+            mediaSize: 209_715_200, mediaUUID: mediaUUID,
+            volumeUUID: nil, volumeName: nil,
+            fileSystemName: fileSystemName, mountPoint: mountPoint,
+            mediaContent: content, mediaContentHint: hint,
+            mediaRegistryID: registryID
+        )
+        let evidence = description.volumeEvidence!
+        expect(evidence.mediaUUID == mediaUUID
+            && evidence.mediaContent == content
+            && evidence.mediaContentHint == hint
+            && evidence.mediaRegistryID == registryID,
+            "DA and IOMedia partition facts must survive the read-only evidence boundary")
+        let mapped = ReadOnlyVolumeMapper.map(
+            evidence, mount: nil, mediaGeneration: snapshot.mediaGeneration
+        )
+        guard let extraIssue else { return mapped }
+        return ReadOnlyVolumeRecord(
+            evidence: mapped.evidence, candidate: mapped.candidate,
+            snapshot: mapped.snapshot, mountObservation: mapped.mountObservation,
+            issues: mapped.issues + [extraIssue]
+        )
+    }
+    func diskWithEFI(
+        _ efi: ReadOnlyVolumeRecord,
+        scheme: String? = "GUID_partition_scheme",
+        issues: [DiskInventoryIssue] = [],
+        extraSiblings: [ReadOnlyVolumeRecord] = []
+    ) -> ReadOnlyPhysicalDiskRecord {
+        ReadOnlyPhysicalDiskRecord(
+            instanceID: snapshot.diskInstanceID,
+            description: DiskArbitrationDescription(
+                bsdName: "disk94", physicalDiskBSDName: "disk94",
+                isWholeDisk: true, isInternal: false,
+                isEjectable: true, isRemovable: true,
+                mediaSize: 1_000_000_000, mediaUUID: nil,
+                volumeUUID: nil, volumeName: nil,
+                fileSystemName: nil, mountPoint: nil,
+                mediaContent: scheme, mediaRegistryID: 9400
+            ),
+            volumes: [target, efi] + extraSiblings, issues: issues
+        )
+    }
+    let efi = efiRecord()
+    let gptDisk = diskWithEFI(efi)
+    expect(efi.isRecognizedUnMountedEFIPartition(on: gptDisk),
+           "the immutable EFI type, GPT parent, media identity and absence of a mount should identify one sibling")
+    let efiObservation = DiskInventoryObservation(
+        physicalDisks: [gptDisk], issues: []
+    )
+    let efiDashboard = ReadOnlyDashboardPresenter.presentation(
+        for: efiObservation,
+        setupAssessment: SetupAssessment(issues: []),
+        isSetupRefreshing: false,
+        setupReport: positiveFSKitSetupReport()
+    )
+    expect(!efiObservation.isComplete && efiObservation.coordinatorInventory == nil,
+           "the EFI UI exception must not promote an incomplete observation to mutation evidence")
+    expect(efiDashboard.phase == .settled
+        && efiDashboard.volumes.count == 1
+        && efiDashboard.volumes[0].actions.canEnableWriting
+        && efiDashboard.volumes[0].actions.canSafeEject,
+        "one recognized unmounted EFI sibling should not block the confirmed NTFS volume UI")
+    expect(efiDashboard.physicalDisks[0].detail.contains("1 个 EFI 分区")
+        && !efiDashboard.physicalDisks[0].detail.contains("disk94")
+        && !efiDashboard.physicalDisks[0].detail.contains(efiMediaUUID),
+        "the physical-disk card should count EFI siblings without raw identifiers")
+    expect(ReadOnlyDashboardPresenter.canOfferSessionEject(
+        sessionTargetID,
+        in: sessionObservation(target: sessionCandidate, siblings: [efi])
+    ), "a previously written candidate may offer eject with one recognized unmounted EFI sibling")
+
+    // Screenshot regression: a native read-only NTFS candidate beside one
+    // unmounted GPT EFI partition must offer the one-time declaration flow.
+    let screenshotNTFS = ReadOnlyVolumeMapper.map(
+        ReadOnlyVolumeEvidence(
+            bsdName: "disk94s2", volumeUUID: "94000000-0000-0000-0000-000000000002",
+            physicalDiskBSDName: "disk94", displayName: "NTFSLAB",
+            fileSystemName: "ntfs", isInternal: false, roleEvidence: .unknown,
+            diskArbitrationMountPoint: "/Volumes/NTFSLAB",
+            mediaUUID: "94000000-0000-0000-0000-000000000102",
+            mediaContent: "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7",
+            mediaContentHint: "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7",
+            mediaRegistryID: 9402
+        ),
+        mount: ReadOnlyMountEvidence(
+            sourceBSDName: "disk94s2", mountPoint: "/Volumes/NTFSLAB",
+            access: .readOnly, backend: .unknown, isComplete: true,
+            isCanonical: true, isSymlink: false
+        ),
+        mediaGeneration: snapshot.mediaGeneration
+    )
+    let screenshotEFI = efiRecord(
+        bsdName: "disk94s1", mediaUUID: "94000000-0000-0000-0000-000000000001",
+        registryID: 9401
+    )
+    let screenshotDisk = ReadOnlyPhysicalDiskRecord(
+        instanceID: snapshot.diskInstanceID,
+        description: gptDisk.description,
+        volumes: [screenshotEFI, screenshotNTFS], issues: []
+    )
+    let screenshotDashboard = ReadOnlyDashboardPresenter.presentation(
+        for: DiskInventoryObservation(physicalDisks: [screenshotDisk], issues: []),
+        setupAssessment: SetupAssessment(issues: []), isSetupRefreshing: false,
+        setupReport: positiveFSKitSetupReport()
+    )
+    expect(screenshotDashboard.phase == .limited
+        && screenshotDashboard.volumes.count == 1
+        && screenshotDashboard.volumes[0].actions.canEnableWriting
+        && screenshotDashboard.volumes[0].actions.requiresDataDeclaration
+        && !screenshotDashboard.volumes[0].actions.canSafeEject,
+        "an unknown-purpose read-only NTFSLAB beside EFI should show writing confirmation, never generic sibling blocking")
+    let screenshotWithoutFSKit = ReadOnlyDashboardPresenter.presentation(
+        for: DiskInventoryObservation(physicalDisks: [screenshotDisk], issues: []),
+        setupAssessment: SetupAssessment(issues: []), isSetupRefreshing: false
+    ).volumes[0].actions
+    expect(screenshotWithoutFSKit.canEnableWriting
+        && screenshotWithoutFSKit.requiresDataDeclaration
+        && !screenshotWithoutFSKit.canSafeEject,
+        "the screenshot candidate must retain its declaration request when Setup has no positive FSKit signal")
+
+    let secondEFI = efiRecord(
+        bsdName: "disk94s7",
+        mediaUUID: "94000000-0000-0000-0000-000000000007",
+        registryID: 9407
+    )
+    let twoEFIDisk = diskWithEFI(efi, extraSiblings: [secondEFI])
+    let twoEFIActions = ReadOnlyDashboardPresenter.presentation(
+        for: DiskInventoryObservation(physicalDisks: [twoEFIDisk], issues: []),
+        setupAssessment: SetupAssessment(issues: []), isSetupRefreshing: false
+    ).volumes[0].actions
+    expect(!twoEFIActions.canEnableWriting && !twoEFIActions.canSafeEject,
+           "the helper v2 layout allows at most one EFI sibling")
+
+    let otherSnapshot = makeSnapshot(
+        uuid: "94000000-0000-0000-0000-000000000008",
+        bsdName: "disk94s8", displayName: "OTHER",
+        physicalDiskID: snapshot.physicalDiskID,
+        mediaGeneration: snapshot.mediaGeneration,
+        fileSystem: .other
+    )
+    let completeOther = ReadOnlyVolumeRecord(
+        evidence: ReadOnlyVolumeEvidence(
+            bsdName: "disk94s8", volumeUUID: otherSnapshot.id.uuid,
+            physicalDiskBSDName: "disk94", displayName: "OTHER",
+            fileSystemName: "msdos", isInternal: false,
+            roleEvidence: .trustedData, diskArbitrationMountPoint: nil
+        ),
+        snapshot: otherSnapshot, mountObservation: nil, issues: []
+    )
+    let otherDisk = diskWithEFI(efi, extraSiblings: [completeOther])
+    let otherActions = ReadOnlyDashboardPresenter.presentation(
+        for: DiskInventoryObservation(physicalDisks: [otherDisk], issues: []),
+        setupAssessment: SetupAssessment(issues: []), isSetupRefreshing: false
+    ).volumes[0].actions
+    expect(!otherActions.canEnableWriting && !otherActions.canSafeEject,
+           "a complete but unsupported sibling must remain outside the helper v2 layout")
+
+    for (name, candidate, disk) in [
+        ("DA content alone", efiRecord(content: efiType, hint: nil), diskWithEFI(efiRecord(content: efiType, hint: nil))),
+        ("missing DA content", efiRecord(content: nil), diskWithEFI(efiRecord(content: nil))),
+        ("contradictory DA content", efiRecord(content: "EFI"), diskWithEFI(efiRecord(content: "EFI"))),
+        ("wrong IOMedia hint", efiRecord(hint: "00000000-0000-0000-0000-000000000001"), diskWithEFI(efiRecord(hint: "00000000-0000-0000-0000-000000000001"))),
+        ("missing FAT probe", efiRecord(fileSystemName: nil), diskWithEFI(efiRecord(fileSystemName: nil))),
+        ("contradictory filesystem probe", efiRecord(fileSystemName: "apfs"), diskWithEFI(efiRecord(fileSystemName: "apfs"))),
+        ("missing media UUID", efiRecord(mediaUUID: nil), diskWithEFI(efiRecord(mediaUUID: nil))),
+        ("missing registry ID", efiRecord(registryID: nil), diskWithEFI(efiRecord(registryID: nil))),
+        ("zero registry ID", efiRecord(registryID: 0), diskWithEFI(efiRecord(registryID: 0))),
+        ("wrong parent", efiRecord(parent: "disk95"), diskWithEFI(efiRecord(parent: "disk95"))),
+        ("mounted", efiRecord(mountPoint: "/Volumes/EFI"), diskWithEFI(efiRecord(mountPoint: "/Volumes/EFI"))),
+        ("extra issue", efiRecord(extraIssue: .mountAccessMismatch), diskWithEFI(efiRecord(extraIssue: .mountAccessMismatch))),
+        ("non-GPT parent", efiRecord(), diskWithEFI(efiRecord(), scheme: "FDisk_partition_scheme")),
+        ("disk issue", efiRecord(), diskWithEFI(efiRecord(), issues: [.missingEjectability(bsdName: "disk94")]))
+    ] {
+        expect(!candidate.isRecognizedUnMountedEFIPartition(on: disk),
+               "\(name) must not receive the narrow EFI classification")
+        let dashboard = ReadOnlyDashboardPresenter.presentation(
+            for: DiskInventoryObservation(physicalDisks: [disk], issues: []),
+            setupAssessment: SetupAssessment(issues: []), isSetupRefreshing: false
+        )
+        expect(!dashboard.volumes[0].actions.canEnableWriting
+            && !dashboard.volumes[0].actions.canSafeEject,
+            "\(name) must keep whole-disk UI actions closed")
+    }
+
+    let mismatch = formalActionPresentation(
+        target: target,
+        diskInstanceID: DiskInstanceID(
+            physicalDiskID: snapshot.physicalDiskID,
+            mediaGeneration: MediaGeneration(rawValue: 95)
+        )
+    ).actions
+    expect(!mismatch.canEnableWriting && !mismatch.canSafeEject
+        && mismatch.writeReason.contains("身份"),
+        "a target from an older media generation cannot borrow current disk safety facts")
+
+    func targetWithMount(_ access: MountAccess) -> ReadOnlyVolumeRecord {
+        ReadOnlyVolumeRecord(
+            evidence: target.evidence,
+            snapshot: makeSnapshot(
+                uuid: snapshot.id.uuid, bsdName: snapshot.id.bsdName,
+                displayName: snapshot.displayName,
+                physicalDiskID: snapshot.physicalDiskID,
+                mediaGeneration: snapshot.mediaGeneration,
+                mountAccess: access
+            ),
+            mountObservation: nil, issues: []
+        )
+    }
+    let existingWrite = formalActionPresentation(
+        target: targetWithMount(.readWrite)
+    ).actions
+    expect(!existingWrite.canEnableWriting && existingWrite.canSafeEject
+        && existingWrite.writeReason.contains("已有可写挂载"),
+        "an existing write mount must explain why writing cannot be re-enabled")
+    let unmounted = formalActionPresentation(
+        target: targetWithMount(.unmounted)
+    ).actions
+    expect(!unmounted.canEnableWriting && unmounted.canSafeEject
+        && unmounted.writeReason.contains("未挂载"),
+        "an unmounted volume must explain its next step without claiming a write mount")
 }
 
 func readOnlyDashboardGroupsAndSortsLongNamedPartitionsDeterministically() {
@@ -13185,15 +14160,52 @@ func safeMountCompilerEmitsOnlyTheFixedValidatedInvocation() {
     }
 }
 
+func protocolDiskFixture(
+    diskName: String,
+    generation: UInt64,
+    targetName: String
+) -> HelperDiskInstanceIdentity {
+    try! HelperDiskInstanceIdentity(
+        physicalDiskBSDName: diskName,
+        mediaGeneration: generation,
+        registryEntryID: 900,
+        mediaContent: "GUID_partition_scheme",
+        partitions: [HelperPartitionIdentity(
+            bsdName: targetName,
+            registryEntryID: 902,
+            mediaUUID: "90200000-0000-0000-0000-000000000002",
+            contentHint: "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7",
+            kind: .ntfsTarget
+        )]
+    )
+}
+
 func helperProtocolRoundTripsOnlyStrictStructuredRequests() async {
     do {
+        let partitions = try [
+            HelperPartitionIdentity(
+                bsdName: "disk9s1", registryEntryID: 901,
+                mediaUUID: "90100000-0000-0000-0000-000000000001",
+                contentHint: "C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
+                kind: .efiSystem
+            ),
+            HelperPartitionIdentity(
+                bsdName: "disk9s2", registryEntryID: 902,
+                mediaUUID: "90200000-0000-0000-0000-000000000002",
+                contentHint: "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7",
+                kind: .ntfsTarget
+            ),
+        ]
         let disk = try HelperDiskInstanceIdentity(
             physicalDiskBSDName: "disk9",
-            mediaGeneration: 7
+            mediaGeneration: 7,
+            registryEntryID: 900,
+            mediaContent: "GUID_partition_scheme",
+            partitions: partitions
         )
         let volume = try HelperVolumeInstanceIdentity(
             volumeUUID: "11111111-1111-1111-1111-111111111111",
-            volumeBSDName: "disk9s1",
+            volumeBSDName: "disk9s2",
             disk: disk
         )
         let fixtures: [(HelperAction, HelperTarget, String)] = [
@@ -13212,6 +14224,8 @@ func helperProtocolRoundTripsOnlyStrictStructuredRequests() async {
                 target: target
             )
             let data = try encoder.encode(request)
+            expect(request.schemaVersion == .v2,
+                   "mutation requests must use the topology-bound helper protocol")
             switch await admission.admit(data) {
             case let .success(admitted):
                 expect(
@@ -13227,9 +14241,16 @@ func helperProtocolRoundTripsOnlyStrictStructuredRequests() async {
             }
         }
 
-        let validDiskJSON = """
-        {"schemaVersion":1,"operationID":"helper-eject-2","action":"ejectDisk","target":{"kind":"disk","disk":{"physicalDiskBSDName":"disk9","mediaGeneration":7}}}
-        """
+        let validDiskJSON = String(decoding: try encoder.encode(HelperRequestEnvelope(
+            operationID: HelperOperationID(validating: "helper-eject-2"),
+            action: .ejectDisk,
+            target: .disk(disk)
+        )), as: UTF8.self)
+        let validVolumeJSON = String(decoding: try encoder.encode(HelperRequestEnvelope(
+            operationID: HelperOperationID(validating: "helper-invalid-volume"),
+            action: .unmountVolume,
+            target: .volume(volume)
+        )), as: UTF8.self)
         guard var envelope = try JSONSerialization.jsonObject(
             with: Data(validDiskJSON.utf8)
         ) as? [String: Any] else {
@@ -13248,8 +14269,8 @@ func helperProtocolRoundTripsOnlyStrictStructuredRequests() async {
         let rejectionFixtures: [(String, HelperRequestRejection)] = [
             (
                 validDiskJSON.replacingOccurrences(
-                    of: "\"schemaVersion\":1",
-                    with: "\"schemaVersion\":2"
+                    of: "\"schemaVersion\":2",
+                    with: "\"schemaVersion\":3"
                 ),
                 .unsupportedSchemaVersion
             ),
@@ -13268,22 +14289,20 @@ func helperProtocolRoundTripsOnlyStrictStructuredRequests() async {
                 .invalidOperationID
             ),
             (
-                """
-                {"schemaVersion":1,"operationID":"helper-mismatch","action":"mountReadWrite","target":{"kind":"disk","disk":{"physicalDiskBSDName":"disk9","mediaGeneration":7}}}
-                """,
+                validDiskJSON.replacingOccurrences(of: "\"ejectDisk\"", with: "\"mountReadWrite\""),
                 .actionTargetMismatch
             ),
             (
-                """
-                {"schemaVersion":1,"operationID":"helper-invalid-volume","action":"unmountVolume","target":{"kind":"volume","volume":{"volumeUUID":"11111111-1111-1111-1111-111111111111","volumeBSDName":"disk9s1s2","disk":{"physicalDiskBSDName":"disk9","mediaGeneration":7}}}}
-                """,
+                validVolumeJSON.replacingOccurrences(of: "\"volumeBSDName\":\"disk9s2\"", with: "\"volumeBSDName\":\"disk9s2s2\""),
                 .invalidIdentity
             ),
             (
-                """
-                {"schemaVersion":1,"operationID":"helper-nested-extra","action":"ejectDisk","target":{"kind":"disk","disk":{"physicalDiskBSDName":"disk9","mediaGeneration":7,"path":"/dev/disk9"}}}
-                """,
+                validDiskJSON.replacingOccurrences(of: "\"mediaGeneration\":7", with: "\"mediaGeneration\":7,\"path\":\"/dev/disk9\""),
                 .unexpectedField
+            ),
+            (
+                validDiskJSON.replacingOccurrences(of: "\"schemaVersion\":2", with: "\"schemaVersion\":1"),
+                .unsupportedSchemaVersion
             ),
         ]
         for (json, expected) in rejectionFixtures {
@@ -14059,12 +15078,11 @@ func coordinatorEffectsCompileIntoExactlyFourHelperMutations() {
         diskInstanceID: disk
     )
     let operationID = OperationID(rawValue: "coordinator-operation-1")
+    let helperDisk = protocolDiskFixture(
+        diskName: "disk12", generation: 42, targetName: "disk12s3"
+    )
     let fixtures: [(VolumeEffect, HelperAction, HelperTarget)]
     do {
-        let helperDisk = try HelperDiskInstanceIdentity(
-            physicalDiskBSDName: "disk12",
-            mediaGeneration: 42
-        )
         let helperVolume = try HelperVolumeInstanceIdentity(
             volumeUUID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             volumeBSDName: "disk12s3",
@@ -14103,7 +15121,7 @@ func coordinatorEffectsCompileIntoExactlyFourHelperMutations() {
     }
 
     for (effect, expectedAction, expectedTarget) in fixtures {
-        switch HelperRequestCompiler.compile(effect: effect) {
+        switch HelperRequestCompiler.compile(effect: effect, diskBinding: helperDisk) {
         case let .success(request):
             expect(
                 request.operationID.rawValue == operationID.rawValue,
@@ -14123,11 +15141,16 @@ func coordinatorEffectsCompileIntoExactlyFourHelperMutations() {
         "observation effects must never cross the helper mutation boundary"
     )
     expect(
+        HelperRequestCompiler.compile(effect: fixtures[0].0) == .failure(.invalidIdentity),
+        "a coordinator effect without fresh cross-process topology cannot become a helper mutation"
+    )
+    expect(
         HelperRequestCompiler.compile(
             effect: .unmountStandard(
                 operationID: OperationID(rawValue: "bad operation id"),
                 target: volume
-            )
+            ),
+            diskBinding: helperDisk
         ) == .failure(.invalidOperationID),
         "invalid coordinator operation IDs must fail before helper transport"
     )
@@ -14140,7 +15163,8 @@ func coordinatorEffectsCompileIntoExactlyFourHelperMutations() {
             effect: .unmountStandard(
                 operationID: operationID,
                 target: invalidVolume
-            )
+            ),
+            diskBinding: helperDisk
         ) == .failure(.invalidIdentity),
         "noncanonical volume identity must fail before helper transport"
     )
@@ -15020,9 +16044,8 @@ func helperAdmissionIsTheOnlyAtomicBoundedRequestEntryPoint() async {
     let admission = HelperRequestAdmission.processLifetime
 
     func diskRequest(_ operationID: String) throws -> Data {
-        let disk = try HelperDiskInstanceIdentity(
-            physicalDiskBSDName: "disk31",
-            mediaGeneration: 9
+        let disk = protocolDiskFixture(
+            diskName: "disk31", generation: 9, targetName: "disk31s1"
         )
         let request = try HelperRequestEnvelope(
             operationID: HelperOperationID(validating: operationID),
@@ -15291,8 +16314,20 @@ presentationLayerKeepsSafetyActionsExplicit()
 print("PASS: presentation layer keeps safety actions explicit")
 volumePresentationUsesAFixedActionAndDisableMatrix()
 print("PASS: VolumePresentation uses a fixed action and disable matrix")
+setupPresentationKeepsUnknownFactsAsCheckResults()
+print("PASS: setup presentation presents unknown facts as read-only check results")
 setupPresentationShowsReadyEnvironment()
 print("PASS: setup presentation shows a ready environment")
+setupPresentationGroupsRelatedChecksWithoutHidingFailures()
+print("PASS: setup presentation groups related checks without hiding failures")
+setupWriteComponentsGroupDoesNotClaimMissingInstallForUnconfiguredTrust()
+print("PASS: unconfigured trust remains distinct from missing installation in grouped Setup")
+setupUnknownFSKitElectionDoesNotClaimExtensionDisabled()
+print("PASS: unknown FSKit election does not claim an extension is disabled")
+setupObservedConflictOutranksIncompleteScanInGroupedSummary()
+print("PASS: observed conflicts remain visible in grouped Setup")
+setupUnknownFSKitFactsDoNotClaimAConfirmedConfigurationFailure()
+print("PASS: unknown FSKit facts remain unverified rather than confirmed misconfiguration")
 setupPresentationNormalizesActionableFailuresWithoutLeakingDriverNames()
 print("PASS: setup presentation normalizes actionable failures without leaking driver names")
 setupPresentationFailsClosedWhileRefreshing()
@@ -15355,6 +16390,8 @@ mountSourceParserAcceptsOnlyCanonicalLocalDiskDevices()
 print("PASS: mount source parser accepts only canonical local disk devices")
 liveMountTableReaderProducesReadOnlyFacts()
 print("PASS: live mount table reader produces read-only facts")
+systemMountTableRejectsCountsThatChangeDuringCopy()
+print("PASS: mount table reader rejects a count change during copy")
 mountTableReaderRequiresTwoConsecutiveStableSnapshots()
 print("PASS: mount table reader requires two consecutive stable snapshots")
 await liveDiskArbitrationStreamProducesReadOnlyDescriptions()
@@ -15491,8 +16528,11 @@ await boundedSetupProbeStopsOnOutputOverflow()
 print("PASS: Setup probe output overflow terminates within its fixed bound")
 await cancellingSetupProbeStillConfirmsTheDirectProcessStops()
 print("PASS: cancelling a Setup probe confirms its direct process stopped")
-readOnlyDashboardNeverExposesMutationControlsOrRawIdentifiers()
-print("PASS: read-only dashboard never exposes mutation controls or raw identifiers")
+formalDashboardOffersWriteRequestForVerifiedExternalDataVolume()
+formalDashboardOffersDeclarationRequestWithoutCandidateEject()
+formalActionPolicyFailsClosedForPhysicalAndSiblingHazards()
+formalDashboardExposesOnlySafeRequestsAndKeepsRawIdentifiersPrivate()
+print("PASS: formal dashboard projects safe request eligibility without raw identifiers")
 readOnlyDashboardGroupsAndSortsLongNamedPartitionsDeterministically()
 print("PASS: read-only dashboard groups and sorts long-named partitions deterministically")
 readOnlySelectionWaitsForAStableAbsenceBeforeResetting()
@@ -16257,7 +17297,7 @@ func helperRequestProcessorExecutesOnlyFreshAdmittedRequests() async {
            "a malformed request must be rejected without reaching the executor")
     let request = try! HelperRequestEnvelope(
         operationID: HelperOperationID(), action: .ejectDisk,
-        target: .disk(HelperDiskInstanceIdentity(physicalDiskBSDName: "disk42", mediaGeneration: 7))
+        target: .disk(helperDiskTarget(disk: "disk42"))
     )
     let data = try! JSONEncoder().encode(request)
     let first = decode(await processor.respond(to: data))
@@ -16271,16 +17311,216 @@ func helperRequestProcessorExecutesOnlyFreshAdmittedRequests() async {
 await helperRequestProcessorExecutesOnlyFreshAdmittedRequests()
 print("PASS: helper XPC processor admits once, rejects malformed and replayed requests before execution")
 
+func helperProcessorSerializesEachPhysicalDiskAcrossClients() async {
+    actor HoldingExecutor {
+        var calls = 0
+        var firstStarted: CheckedContinuation<Void, Never>?
+        var releaseFirst: CheckedContinuation<Void, Never>?
+
+        func execute() async -> HelperResponseEnvelope {
+            calls += 1
+            if calls == 1 {
+                await withCheckedContinuation { continuation in
+                    releaseFirst = continuation
+                    firstStarted?.resume()
+                    firstStarted = nil
+                }
+            }
+            return HelperResponseEnvelope(resultCode: .succeeded, exitStatus: 0)
+        }
+
+        func waitForFirst() async {
+            if releaseFirst != nil { return }
+            await withCheckedContinuation { firstStarted = $0 }
+        }
+
+        func release() {
+            releaseFirst?.resume()
+            releaseFirst = nil
+        }
+    }
+
+    let executor = HoldingExecutor()
+    let processor = HelperRequestProcessor(admission: .isolatedForChecks()) { _ in
+        await executor.execute()
+    }
+    func request() -> Data {
+        let envelope = try! HelperRequestEnvelope(
+            operationID: HelperOperationID(), action: .ejectDisk,
+            target: .disk(helperDiskTarget(disk: "disk42"))
+        )
+        return try! JSONEncoder().encode(envelope)
+    }
+    let first = Task { await processor.respond(to: request()) }
+    await executor.waitForFirst()
+    let overlapping = await processor.respond(to: request())
+    let overlappingReply = try! HelperResponseDecoder().decode(overlapping).get()
+    let callCountWhileHeld = await executor.calls
+    expect(overlappingReply.resultCode == .rejectedDiskBusy && callCountWhileHeld == 1,
+           "the helper must reject an overlapping request on the same physical disk")
+    await executor.release()
+    let firstReply = try! HelperResponseDecoder().decode(await first.value).get()
+    expect(firstReply.resultCode == .succeeded,
+           "releasing the per-disk lease must let the original request finish")
+}
+
+await helperProcessorSerializesEachPhysicalDiskAcrossClients()
+print("PASS: helper serializes physical-disk execution across XPC clients")
+
+func helperPostconditionFailureFreezesItsDiskLease() async {
+    actor Calls {
+        var count = 0
+        func execute() -> HelperResponseEnvelope {
+            count += 1
+            return HelperResponseEnvelope(
+                resultCode: count == 1 ? .postconditionFailed : .succeeded,
+                exitStatus: count == 1 ? 1 : 0
+            )
+        }
+    }
+    let calls = Calls()
+    let processor = HelperRequestProcessor(admission: .isolatedForChecks()) { _ in
+        await calls.execute()
+    }
+    func request(_ disk: String) -> Data {
+        let envelope = try! HelperRequestEnvelope(
+            operationID: HelperOperationID(), action: .ejectDisk,
+            target: .disk(helperDiskTarget(disk: disk))
+        )
+        return try! JSONEncoder().encode(envelope)
+    }
+    let first = try! HelperResponseDecoder().decode(await processor.respond(to: request("disk42"))).get()
+    let sameDisk = try! HelperResponseDecoder().decode(await processor.respond(to: request("disk42"))).get()
+    let otherDisk = try! HelperResponseDecoder().decode(await processor.respond(to: request("disk43"))).get()
+    let callCount = await calls.count
+    expect(first.resultCode == .postconditionFailed && sameDisk.resultCode == .rejectedDiskBusy
+           && otherDisk.resultCode == .succeeded && callCount == 2,
+           "a helper operation with unknown postcondition must freeze that disk across later XPC requests")
+}
+
+await helperPostconditionFailureFreezesItsDiskLease()
+print("PASS: helper retains the per-disk execution lease after an unknown postcondition")
+
+func helperUnreapedChildFreezesAllFutureRequests() async {
+    let uncertainty = HelperProcessUncertainty()
+    actor Calls {
+        var count = 0
+        func record() { count += 1 }
+    }
+    let calls = Calls()
+    let processor = HelperRequestProcessor(
+        admission: .isolatedForChecks(), uncertainty: uncertainty
+    ) { _ in
+        await calls.record()
+        uncertainty.markUnknown()
+        return HelperResponseEnvelope(resultCode: .executionFailed, exitStatus: 1)
+    }
+    func request(_ disk: String) -> Data {
+        let envelope = try! HelperRequestEnvelope(
+            operationID: HelperOperationID(), action: .ejectDisk,
+            target: .disk(helperDiskTarget(disk: disk))
+        )
+        return try! JSONEncoder().encode(envelope)
+    }
+    let first = try! HelperResponseDecoder().decode(await processor.respond(to: request("disk42"))).get()
+    let otherDisk = try! HelperResponseDecoder().decode(await processor.respond(to: request("disk43"))).get()
+    let callCount = await calls.count
+    let frozen = await processor.hasFrozenDisk()
+    expect(first.resultCode == .postconditionFailed && otherDisk.resultCode == .rejectedDiskBusy
+           && callCount == 1 && frozen,
+           "an unconfirmed child must make the active operation unknown and bar later XPC requests")
+}
+
+await helperUnreapedChildFreezesAllFutureRequests()
+print("PASS: unconfirmed helper child freezes process-wide execution")
+
+func helperCallbackTimeoutIgnoresLateCompletion() async {
+    let registry = HelperOneShotCallbackRegistry()
+    let late = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+        let token = registry.register(continuation, retainedResource: NSObject())!
+        expect(registry.timeout(token) && registry.pendingCount == 1,
+               "timeout must resume once while retaining callback context until the real callback")
+        expect(!registry.complete(token, result: true) && registry.pendingCount == 0,
+               "a callback after timeout must release context without resuming twice")
+    }
+    expect(late == false, "timeout must return an unknown/failed operation result")
+    let completed = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+        let token = registry.register(continuation, retainedResource: NSObject())!
+        expect(registry.complete(token, result: true) && !registry.timeout(token),
+               "a completed DA callback must win over a later timeout")
+    }
+    expect(completed, "the callback result must be preserved when it wins the race")
+}
+
+await helperCallbackTimeoutIgnoresLateCompletion()
+print("PASS: helper DA callback token survives timeouts and ignores late completion")
+
+func controlledHelperChild(_ script: String) -> (pid: pid_t, readFD: Int32) {
+    var descriptors: [Int32] = [0, 0]
+    expect(pipe(&descriptors) == 0, "controlled child stdout pipe must open")
+    var actions: posix_spawn_file_actions_t?
+    expect(posix_spawn_file_actions_init(&actions) == 0, "controlled child spawn actions must initialize")
+    defer { posix_spawn_file_actions_destroy(&actions) }
+    expect(posix_spawn_file_actions_adddup2(&actions, descriptors[1], STDOUT_FILENO) == 0,
+           "controlled child must write to its captured pipe")
+    expect(posix_spawn_file_actions_addclose(&actions, descriptors[0]) == 0,
+           "controlled child must not retain the pipe reader")
+    expect(posix_spawn_file_actions_addclose(&actions, descriptors[1]) == 0,
+           "controlled child must not retain the original writer")
+    let argv: [UnsafeMutablePointer<CChar>?] = [strdup("sh"), strdup("-c"), strdup(script), nil]
+    defer { argv.forEach { free($0) } }
+    let environment: [UnsafeMutablePointer<CChar>?] = [strdup("PATH=/usr/bin:/bin"), nil]
+    defer { environment.forEach { free($0) } }
+    var pid: pid_t = 0
+    let result = posix_spawn(&pid, "/bin/sh", &actions, nil, argv, environment)
+    close(descriptors[1])
+    expect(result == 0 && pid > 0, "controlled child must start")
+    return (pid, descriptors[0])
+}
+
+func helperChildIOHasOneDeadlineAndReapsTimedOutChildren() async {
+    let quick = controlledHelperChild("printf ok")
+    let quickResult = await BoundedHelperChildIO.run(
+        pid: quick.pid, outputFD: quick.readFD, timeout: .seconds(1), maximumOutputBytes: 64
+    )
+    expect(quickResult == .completed(exitStatus: 0, output: Data("ok".utf8)),
+           "normal child output and exit must both complete")
+
+    let blocked = controlledHelperChild("printf ok; exec sleep 4")
+    let started = ContinuousClock.now
+    let blockedResult = await BoundedHelperChildIO.run(
+        pid: blocked.pid, outputFD: blocked.readFD, timeout: .milliseconds(150),
+        maximumOutputBytes: 64, terminationGrace: .milliseconds(300), killGrace: .milliseconds(500)
+    )
+    expect(blockedResult == .timedOutReaped,
+           "an open stdout pipe must not block past the child deadline")
+    expect(started.duration(to: .now) < .seconds(2),
+           "timeout cleanup must terminate and reap the controlled child promptly")
+    expect(kill(blocked.pid, 0) != 0 && errno == ESRCH,
+           "timeout must leave no running child eligible for a later disk operation")
+
+    let noisy = controlledHelperChild("printf 123456789")
+    let noisyResult = await BoundedHelperChildIO.run(
+        pid: noisy.pid, outputFD: noisy.readFD, timeout: .seconds(1), maximumOutputBytes: 4
+    )
+    expect(noisyResult == .ioFailedReaped,
+           "excess output must fail closed and reap the controlled child")
+}
+
+await helperChildIOHasOneDeadlineAndReapsTimedOutChildren()
+print("PASS: helper child I/O never blocks on EOF and reaps bounded timeout/output failures")
+
 func helperServiceRequirementsPinTeamAndIdentifiers() {
     expect(HelperServiceIdentity.clientRequirement ==
            "anchor apple generic and identifier \"com.leolu.ntfslite.readonly\" and certificate leaf[subject.OU] = \"NP3U2GYHWL\"",
            "the helper must accept only the formal app signed by the pinned team")
     expect(HelperServiceIdentity.helperRequirement ==
-           "anchor apple generic and identifier \"com.leolu.ntfslite.helper\" and certificate leaf[subject.OU] = \"NP3U2GYHWL\"",
-           "the app must accept only the helper signed by the pinned team")
+           "anchor apple generic and identifier \"com.leolu.ntfslite.helper.v2\" and certificate leaf[subject.OU] = \"NP3U2GYHWL\"",
+           "the app must accept only the current helper identity signed by the pinned team")
     expect(HelperServiceIdentity.machServiceName == HelperServiceIdentity.helperIdentifier
-           && HelperServiceIdentity.daemonPlistName == "com.leolu.ntfslite.helper.plist",
-           "the launchd label, mach service and plist name must stay aligned")
+           && HelperServiceIdentity.daemonPlistName == "com.leolu.ntfslite.helper.v2.plist"
+           && HelperServiceIdentity.machServiceName != "com.leolu.ntfslite.helper",
+           "the current service must be distinct from legacy helpers and keep its names aligned")
 }
 
 helperServiceRequirementsPinTeamAndIdentifiers()
@@ -16288,8 +17528,15 @@ print("PASS: helper XPC code-signing requirements pin the team and both identifi
 
 final class FakeWritableMountSystem: WritableMountSystem, @unchecked Sendable {
     var facts: [String: HelperVolumeFacts]
+    var topology = helperMediaTopology()
+    var topologyReadCount = 0
+    var replacementTopologyAfterRead: Int?
+    var ownedByDevice: [String: [HelperOwnedMount]] = [:]
     var bootSectors: [Data]
     var healthClean: Bool? = true
+    var fsKitReady: Bool? = true
+    var replacementVolumeUUIDAfterHealth: String?
+    var nativeUnmountSucceeds = true
     var mount: HelperMountEntry?
     var mountAppearsAfterStart = true
     var placeholder = true
@@ -16299,48 +17546,89 @@ final class FakeWritableMountSystem: WritableMountSystem, @unchecked Sendable {
     var calls: [String] = []
 
     init() {
-        facts = ["disk6s2": HelperVolumeFacts(
+        facts = ["disk6": HelperVolumeFacts(
+            bsdName: "disk6", wholeDiskBSDName: "disk6", isWholeDisk: true, isInternal: false,
+            isRemovable: true, isEjectable: true, deviceProtocol: "USB", fileSystemName: nil,
+            mountPoint: nil, isWritableMount: nil, volumeUUID: nil,
+            mediaContent: "GUID_partition_scheme"
+        ), "disk6s1": HelperVolumeFacts(
+            bsdName: "disk6s1", wholeDiskBSDName: "disk6", isWholeDisk: false, isInternal: false,
+            isRemovable: true, isEjectable: true, deviceProtocol: "USB", fileSystemName: "msdos",
+            mountPoint: nil, isWritableMount: nil, volumeUUID: nil,
+            mediaUUID: "11111111-1111-1111-1111-111111111111",
+            mediaContent: "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+        ), "disk6s2": HelperVolumeFacts(
             bsdName: "disk6s2", wholeDiskBSDName: "disk6", isWholeDisk: false, isInternal: false,
             isRemovable: true, isEjectable: true, deviceProtocol: "USB", fileSystemName: "ntfs",
             mountPoint: "/Volumes/NTFSLAB", isWritableMount: false,
-            volumeUUID: "11111111-2222-3333-4444-555555555555", volumeName: "NTFSLAB"
+            volumeUUID: "11111111-2222-3333-4444-555555555555", volumeName: "NTFSLAB",
+            mediaUUID: "22222222-2222-2222-2222-222222222222", mediaContent: "Windows_NTFS"
         )]
         var boot = Data(repeating: 0, count: 512)
         boot.replaceSubrange(3..<11, with: Data("NTFS    ".utf8))
         boot[72] = 9
         boot[510] = 0x55
         boot[511] = 0xAA
-        bootSectors = [boot, boot]
+        bootSectors = [boot, boot, boot]
     }
 
     func volumeFacts(bsdName: String) async -> HelperVolumeFacts? { calls.append("facts"); return facts[bsdName] }
+    func mediaTopology(diskBSDName: String) async -> HelperMediaTopology? {
+        calls.append("topology")
+        topologyReadCount += 1
+        guard diskBSDName == "disk6" else { return nil }
+        if let replacementTopologyAfterRead, topologyReadCount > replacementTopologyAfterRead {
+            return helperMediaTopology(diskRegistryEntryID: 999)
+        }
+        return topology
+    }
+    func ownedFSKitMounts(devicePath: String) async -> [HelperOwnedMount]? {
+        calls.append("owned")
+        return ownedByDevice[devicePath] ?? []
+    }
     func readBootSector(partitionBSDName: String) async -> Data? {
         calls.append("boot")
         return bootSectors.isEmpty ? nil : bootSectors.removeFirst()
     }
-    func unmountNative(bsdName: String) async -> Bool {
+    func fsKitRuntimeReady() async -> Bool? {
+        calls.append("runtime")
+        return fsKitReady
+    }
+    func unmountNative(bsdName: String, expectedRegistryEntryID: UInt64) async -> Bool {
         calls.append("unmount")
+        guard expectedRegistryEntryID == 602 else { return false }
+        if !nativeUnmountSucceeds { return false }
         if let current = facts[bsdName] {
             facts[bsdName] = HelperVolumeFacts(
                 bsdName: current.bsdName, wholeDiskBSDName: current.wholeDiskBSDName,
                 isWholeDisk: current.isWholeDisk, isInternal: current.isInternal,
                 isRemovable: current.isRemovable, isEjectable: current.isEjectable,
                 deviceProtocol: current.deviceProtocol, fileSystemName: current.fileSystemName,
-                mountPoint: nil, isWritableMount: nil, volumeUUID: nil, volumeName: current.volumeName
+                mountPoint: nil, isWritableMount: nil, volumeUUID: nil, volumeName: current.volumeName,
+                mediaUUID: current.mediaUUID, mediaContent: current.mediaContent
             )
         }
         return true
     }
-    func healthIsClean(bsdName: String) async -> Bool? { calls.append("health"); return healthClean }
+    func healthIsClean(bsdName: String) async -> Bool? {
+        calls.append("health")
+        if let replacementVolumeUUIDAfterHealth {
+            facts[bsdName]?.volumeUUID = replacementVolumeUUIDAfterHealth
+        }
+        return healthClean
+    }
     var existingPaths: Set<String> = []
     var startedMountPoint: String?
     func pathExists(_ path: String) async -> Bool { existingPaths.contains(path) }
-    func startDriver(bsdName: String, mountPoint: String) async -> Int32? {
+    func startDriver(bsdName: String, expectedRegistryEntryID: UInt64, mountPoint: String) async -> Int32? {
         calls.append("start")
+        guard expectedRegistryEntryID == 602 else { return nil }
         startedMountPoint = mountPoint
         if mountAppearsAfterStart {
             mount = mount ?? HelperMountEntry(source: "/dev/disk9", mountPoint: mountPoint,
                                               flags: ["macfuse", "local", "nodev", "nosuid", "fskit"])
+            ownedByDevice["/dev/" + bsdName] = [HelperOwnedMount(mountPoint: mountPoint, driverPID: 4242)]
+            facts[bsdName]?.mountPoint = mountPoint
         }
         return 4242
     }
@@ -16352,11 +17640,171 @@ final class FakeWritableMountSystem: WritableMountSystem, @unchecked Sendable {
     func pause() async {}
 }
 
-func writableMountTarget(uuid: String = "11111111-2222-3333-4444-555555555555", volume: String = "disk6s2",
-                         disk: String = "disk6") -> HelperVolumeInstanceIdentity {
+func helperMediaTopology(
+    diskRegistryEntryID: UInt64 = 600, efiRegistryEntryID: UInt64 = 601,
+    efiMediaUUID: String = "11111111-1111-1111-1111-111111111111",
+    ntfsRegistryEntryID: UInt64 = 602,
+    ntfsContent: String = "Windows_NTFS",
+    ntfsContentHint: String = "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7",
+    extraPartition: Bool = false
+) -> HelperMediaTopology {
+    let disk = HelperObservedMedia(
+        bsdName: "disk6", registryEntryID: diskRegistryEntryID, parentRegistryEntryID: nil,
+        isWholeDisk: true, mediaUUID: nil, content: "GUID_partition_scheme", contentHint: nil
+    )
+    let efi = HelperObservedMedia(
+        bsdName: "disk6s1", registryEntryID: efiRegistryEntryID,
+        parentRegistryEntryID: diskRegistryEntryID, isWholeDisk: false,
+        mediaUUID: efiMediaUUID, content: "c12a7328-f81f-11d2-ba4b-00a0c93ec93b",
+        contentHint: "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+    )
+    let ntfs = HelperObservedMedia(
+        bsdName: "disk6s2", registryEntryID: ntfsRegistryEntryID,
+        parentRegistryEntryID: diskRegistryEntryID, isWholeDisk: false,
+        mediaUUID: "22222222-2222-2222-2222-222222222222", content: ntfsContent,
+        contentHint: ntfsContentHint
+    )
+    let extra = HelperObservedMedia(
+        bsdName: "disk6s3", registryEntryID: 603,
+        parentRegistryEntryID: diskRegistryEntryID, isWholeDisk: false,
+        mediaUUID: "33333333-3333-3333-3333-333333333333", content: "Windows_NTFS",
+        contentHint: "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7"
+    )
+    return HelperMediaTopology(disk: disk, partitions: extraPartition ? [efi, ntfs, extra] : [efi, ntfs])
+}
+
+func helperTopologySettlementAndMountSourceBindingFailClosed() {
+    let first = helperMediaTopology()
+    var reads: ArraySlice<HelperMediaTopology?> = [first, first][...]
+    expect(HelperMediaTopologySettlement.settled { reads.popFirst() ?? nil } == first,
+           "two identical complete IOMedia samples must settle")
+    reads = [first, nil, first, first][...]
+    expect(HelperMediaTopologySettlement.settled { reads.popFirst() ?? nil } == nil,
+           "an unreadable sample must invalidate the whole topology observation")
+    reads = [first, helperMediaTopology(diskRegistryEntryID: 999), first,
+             helperMediaTopology(diskRegistryEntryID: 999), first, helperMediaTopology(diskRegistryEntryID: 999)][...]
+    expect(HelperMediaTopologySettlement.settled { reads.popFirst() ?? nil } == nil,
+           "a changing whole-disk entry ID must never settle")
+
+    let mount = HelperOwnedMount(mountPoint: "/Volumes/NTFSLAB", driverPID: 4242)
+    expect(HelperMountSourceBinding.accepts(
+        source: "/dev/disk6s2", devicePath: "/dev/disk6s2",
+        mountPoint: mount.mountPoint, ownedMounts: nil, isFSKitPlaceholder: false
+    ), "a native mount must be bound to its partition source")
+    expect(HelperMountSourceBinding.accepts(
+        source: "/dev/disk9", devicePath: "/dev/disk6s2",
+        mountPoint: mount.mountPoint, ownedMounts: [mount], isFSKitPlaceholder: true
+    ), "a verified FSKit placeholder may report its virtual source when our driver owns the target")
+    for (owned, placeholder) in [([mount], false), ([], true),
+                                 ([HelperOwnedMount(mountPoint: "/Volumes/Other", driverPID: 4242)], true)] {
+        expect(!HelperMountSourceBinding.accepts(
+            source: "/dev/disk9", devicePath: "/dev/disk6s2",
+            mountPoint: mount.mountPoint, ownedMounts: owned, isFSKitPlaceholder: placeholder
+        ), "an unknown or mismatched FSKit source must not be accepted as target facts")
+    }
+}
+
+helperTopologySettlementAndMountSourceBindingFailClosed()
+print("PASS: helper topology settlement and FSKit mount source binding reject unstable or unowned facts")
+
+func helperProcessInventoryRejectsTruncationAndUnknownProcesses() {
+    typealias Sample = HelperProcessInventorySample
+    var samples: ArraySlice<Sample?> = [
+        Sample(reportedCount: 2, capacity: 4, processIDs: [11, 22]),
+        Sample(reportedCount: 2, capacity: 4, processIDs: [22, 11])
+    ][...]
+    expect(HelperProcessInventorySettlement.settled { samples.popFirst() ?? nil } == [11, 22],
+           "a complete, stable PID set may be inspected")
+    let unsafeSamples: [[Sample?]] = [
+        [Sample(reportedCount: 2, capacity: 2, processIDs: [11, 22])],
+        [Sample(reportedCount: 2, capacity: 4, processIDs: [11])],
+        [Sample(reportedCount: 2, capacity: 4, processIDs: [11, 11])],
+        [Sample(reportedCount: 1, capacity: 4, processIDs: [11]), nil],
+        [Sample(reportedCount: 1, capacity: 4, processIDs: [11]),
+         Sample(reportedCount: 1, capacity: 4, processIDs: [22])]
+    ]
+    for sequence in unsafeSamples {
+        samples = sequence[...]
+        expect(HelperProcessInventorySettlement.settled { samples.popFirst() ?? nil } == nil,
+               "truncated, unreadable, duplicate or changing PID samples must not certify a complete scan")
+    }
+    expect(HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(errno: ESRCH),
+           "a process proven exited can be ignored")
+    expect(!HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(errno: EACCES),
+           "an active but unreadable process must make owned-mount discovery unknown")
+}
+
+helperProcessInventoryRejectsTruncationAndUnknownProcesses()
+print("PASS: helper process enumeration refuses truncated PID lists and unreadable live processes")
+
+func helperMountTableRequiresCompleteStableReads() {
+    expect(HelperMountTableSnapshotPolicy.isComplete(
+        initialCount: 3, copiedCount: 3, countAfterRead: 3, capacity: 11
+    ), "a complete mount-table read may be inspected")
+    for counts in [(3, 4, 4, 11), (3, 4, 4, 4), (3, 3, 4, 11), (3, 3, 3, 3), (3, -1, 3, 11)] {
+        expect(!HelperMountTableSnapshotPolicy.isComplete(
+            initialCount: counts.0, copiedCount: counts.1,
+            countAfterRead: counts.2, capacity: counts.3
+        ), "truncated or changed mount-table counts must remain unknown")
+    }
+}
+
+helperMountTableRequiresCompleteStableReads()
+print("PASS: helper mount-table reads reject capacity exhaustion and topology changes")
+
+func helperDiskAbsenceRequiresTheOriginalIOMediaObjectToDisappear() {
+    expect(HelperDiskPresencePolicy.isPresent(
+        deviceNodeExists: false, bsdNameInRegistry: false,
+        requestedEntryInRegistry: false, diskArbitrationHasDisk: false
+    ) == false, "all four fresh sources must agree that the requested disk disappeared")
+    expect(HelperDiskPresencePolicy.isPresent(
+        deviceNodeExists: false, bsdNameInRegistry: false,
+        requestedEntryInRegistry: true, diskArbitrationHasDisk: false
+    ) == true, "the original IOMedia object remaining with no BSD name is still present")
+    expect(HelperDiskPresencePolicy.isPresent(
+        deviceNodeExists: false, bsdNameInRegistry: false,
+        requestedEntryInRegistry: nil, diskArbitrationHasDisk: false
+    ) == nil, "an unreadable registry identity cannot certify safe removal")
+}
+
+helperDiskAbsenceRequiresTheOriginalIOMediaObjectToDisappear()
+print("PASS: helper eject confirmation binds absence to the requested IOMedia entry ID")
+
+func helperDiskTarget(
+    disk: String = "disk6", registryEntryID: UInt64 = 600,
+    efiRegistryEntryID: UInt64 = 601,
+    efiMediaUUID: String = "11111111-1111-1111-1111-111111111111"
+) -> HelperDiskInstanceIdentity {
+    let efi = try! HelperPartitionIdentity(
+        bsdName: "\(disk)s1", registryEntryID: efiRegistryEntryID,
+        mediaUUID: efiMediaUUID,
+        contentHint: "c12a7328-f81f-11d2-ba4b-00a0c93ec93b", kind: .efiSystem
+    )
+    let ntfs = try! HelperPartitionIdentity(
+        bsdName: "\(disk)s2", registryEntryID: 602,
+        mediaUUID: "22222222-2222-2222-2222-222222222222",
+        contentHint: "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7", kind: .ntfsTarget
+    )
+    return try! HelperDiskInstanceIdentity(
+        physicalDiskBSDName: disk, mediaGeneration: 1,
+        registryEntryID: registryEntryID, mediaContent: "GUID_partition_scheme",
+        partitions: [efi, ntfs]
+    )
+}
+
+func writableMountTarget(
+    uuid: String = "11111111-2222-3333-4444-555555555555", volume: String = "disk6s2",
+    disk: String = "disk6", registryEntryID: UInt64 = 600,
+    efiRegistryEntryID: UInt64 = 601,
+    efiMediaUUID: String = "11111111-1111-1111-1111-111111111111"
+) -> HelperVolumeInstanceIdentity {
     try! HelperVolumeInstanceIdentity(
         volumeUUID: uuid, volumeBSDName: volume,
-        disk: HelperDiskInstanceIdentity(physicalDiskBSDName: disk, mediaGeneration: 1)
+        disk: helperDiskTarget(
+            disk: disk, registryEntryID: registryEntryID,
+            efiRegistryEntryID: efiRegistryEntryID,
+            efiMediaUUID: efiMediaUUID
+        )
     )
 }
 
@@ -16364,7 +17812,9 @@ func writableMountExecutorVerifiesBeforeAndAfterMutation() async {
     let happy = FakeWritableMountSystem()
     let success = await WritableMountExecutor.run(target: writableMountTarget(), system: happy)
     expect(success == HelperResponseEnvelope(resultCode: .succeeded, exitStatus: 0)
-           && happy.calls.starts(with: ["facts", "boot", "unmount", "facts", "boot", "health", "start"]),
+           && happy.calls.firstIndex(of: "topology")! < happy.calls.firstIndex(of: "unmount")!
+           && happy.calls.firstIndex(of: "runtime")! < happy.calls.firstIndex(of: "unmount")!
+           && happy.calls.firstIndex(of: "unmount")! < happy.calls.firstIndex(of: "start")!,
            "a verified external NTFS data volume must be bound, unmounted, health-checked and mounted in order")
 
     func refused(_ configure: (FakeWritableMountSystem) -> Void, target: HelperVolumeInstanceIdentity = writableMountTarget(),
@@ -16392,10 +17842,59 @@ func writableMountExecutorVerifiesBeforeAndAfterMutation() async {
                   "a request for a volume that is not present must be refused")
     await refused({ change($0) { $0.wholeDiskBSDName = "disk7" } }, .targetMismatch,
                   "a partition that moved to another whole disk must be refused")
+    await refused({ _ in }, target: writableMountTarget(registryEntryID: 999), .targetMismatch,
+                  "a replaced whole-disk IOMedia instance must be refused before native unmount")
+    await refused({ _ in }, target: writableMountTarget(efiRegistryEntryID: 999), .targetMismatch,
+                  "a replaced EFI IOMedia instance must be refused before native unmount")
+    await refused({ _ in }, target: writableMountTarget(
+        efiMediaUUID: "99999999-1111-1111-1111-111111111111"
+    ), .targetMismatch, "an EFI partition UUID change must be refused before native unmount")
+    await refused({ $0.topology = helperMediaTopology(
+        ntfsContentHint: "99999999-1111-1111-1111-111111111111"
+    ) }, .targetMismatch, "a non-Basic-Data GPT target must be refused before native unmount")
+    await refused({ system in
+        system.topology = helperMediaTopology(ntfsContent: "Apple_APFS")
+        system.facts["disk6s2"]?.mediaContent = "Apple_APFS"
+    }, .targetMismatch, "a target reporting a contradictory probed content must stop before native unmount")
+    await refused({ $0.topology = helperMediaTopology(extraPartition: true) }, .targetMismatch,
+                  "an unlisted third partition must stop before native unmount")
+    await refused({ $0.facts["disk6s1"]?.mountPoint = "/Volumes/EFI" }, .targetMismatch,
+                  "a mounted EFI sibling must stop before native unmount")
+    await refused({ $0.facts["disk6s1"]?.mediaUUID = nil }, .targetMismatch,
+                  "missing DA partition identity must stop before native unmount")
+    await refused({ $0.facts["disk6s1"]?.fileSystemName = nil }, .targetMismatch,
+                  "an EFI sibling without a confirmed msdos filesystem must stop before native unmount")
+    await refused({ $0.facts["disk6s1"]?.mediaContent = "EFI" }, .targetMismatch,
+                  "an EFI sibling with the wrong DA GPT content must stop before native unmount")
+    await refused({ $0.facts["disk6s1"]?.isRemovable = nil }, .notExternalRemovable,
+                  "unknown EFI removability must stop before native unmount")
+    await refused({ $0.facts["disk6s2"]?.deviceProtocol = nil }, .notExternalRemovable,
+                  "unknown target device protocol must stop before native unmount")
+    await refused({ $0.facts["disk6s1"]?.isEjectable = false }, .notExternalRemovable,
+                  "a non-ejectable EFI child must stop before native unmount")
+    await refused({ $0.facts["disk6s1"]?.deviceProtocol = "Thunderbolt" }, .targetMismatch,
+                  "a child reporting a different device protocol must stop before native unmount")
+    await refused({ $0.replacementTopologyAfterRead = 1 }, .targetMismatch,
+                  "a media instance changing during the first preflight must stop before native unmount")
+    await refused({ $0.topology = HelperMediaTopology(
+        disk: $0.topology.disk,
+        partitions: $0.topology.partitions.map { partition in
+            partition.bsdName == "disk6s1" ? HelperObservedMedia(
+                bsdName: partition.bsdName, registryEntryID: partition.registryEntryID,
+                parentRegistryEntryID: 999, isWholeDisk: partition.isWholeDisk,
+                mediaUUID: partition.mediaUUID, content: partition.content,
+                contentHint: partition.contentHint
+            ) : partition
+        }
+    ) }, .targetMismatch, "an EFI partition attached to another whole-disk object must stop before native unmount")
     await refused({ change($0) { $0.isWritableMount = true } }, .notNativeReadOnly,
                   "an already writable volume must not be remounted")
     await refused({ $0.bootSectors = [Data(repeating: 0, count: 512)] }, .bootSectorInvalid,
                   "an unreadable or non-NTFS boot sector must be refused before unmounting")
+    await refused({ $0.fsKitReady = false }, .fsKitUnavailable,
+                  "a disabled FSKit runtime must be refused before native unmount")
+    await refused({ $0.fsKitReady = nil }, .fsKitUnavailable,
+                  "an unknown FSKit runtime must be refused before native unmount")
 
     func afterUnmount(_ configure: (FakeWritableMountSystem) -> Void, _ expected: WritableMountFailure,
                       started: Bool, _ message: String) async {
@@ -16407,6 +17906,17 @@ func writableMountExecutorVerifiesBeforeAndAfterMutation() async {
     }
     await afterUnmount({ $0.bootSectors[1][72] = 8 }, .bootSectorChanged, started: false,
                        "different media after unmount must stop before the health check and driver")
+    await afterUnmount({ $0.nativeUnmountSucceeds = false }, .nativeUnmountFailed, started: false,
+                       "a failed DA unmount may have changed state and must require reconciliation")
+    await afterUnmount({ $0.replacementTopologyAfterRead = 4 }, .targetMismatch, started: false,
+                       "a media instance changing after native unmount must stop before the driver")
+    await afterUnmount({ $0.replacementTopologyAfterRead = 6 }, .targetMismatch, started: false,
+                       "a media instance changing during the health probe must stop before the driver")
+    await afterUnmount({ $0.replacementVolumeUUIDAfterHealth = "99999999-2222-3333-4444-555555555555" },
+                       .volumeUUIDMismatch, started: false,
+                       "a contradictory DA filesystem UUID after the health probe must stop before the driver")
+    await afterUnmount({ $0.replacementTopologyAfterRead = 8 }, .targetMismatch, started: true,
+                       "a media instance changing after driver start must not be reported writable")
     await afterUnmount({ $0.healthClean = false }, .healthNotClean, started: false,
                        "a dirty or hibernated volume must never be mounted writable")
     await afterUnmount({ $0.healthClean = nil }, .healthNotClean, started: false,
@@ -16443,21 +17953,37 @@ await writableMountExecutorVerifiesBeforeAndAfterMutation()
 print("PASS: helper writable mount binds identity, checks health and verifies the FSKit mount, failing closed")
 
 final class FakeDiskReleaseSystem: DiskReleaseSystem, @unchecked Sendable {
+    var topology = helperMediaTopology()
+    var topologyReadCount = 0
+    var replacementTopologyAfterRead: Int?
     var volume = HelperVolumeFacts(
         bsdName: "disk6s2", wholeDiskBSDName: "disk6", isWholeDisk: false, isInternal: false,
         isRemovable: true, isEjectable: true, deviceProtocol: "USB", fileSystemName: "ntfs",
-        mountPoint: nil, isWritableMount: nil, volumeUUID: nil
+        mountPoint: nil, isWritableMount: nil, volumeUUID: nil,
+        mediaUUID: "22222222-2222-2222-2222-222222222222", mediaContent: "Windows_NTFS"
     )
     var disk = HelperVolumeFacts(
         bsdName: "disk6", wholeDiskBSDName: "disk6", isWholeDisk: true, isInternal: false,
         isRemovable: true, isEjectable: true, deviceProtocol: "USB", fileSystemName: nil,
-        mountPoint: nil, isWritableMount: nil, volumeUUID: nil
+        mountPoint: nil, isWritableMount: nil, volumeUUID: nil,
+        mediaContent: "GUID_partition_scheme"
+    )
+    var efi = HelperVolumeFacts(
+        bsdName: "disk6s1", wholeDiskBSDName: "disk6", isWholeDisk: false, isInternal: false,
+        isRemovable: true, isEjectable: true, deviceProtocol: "USB", fileSystemName: "msdos",
+        mountPoint: nil, isWritableMount: nil, volumeUUID: nil,
+        mediaUUID: "11111111-1111-1111-1111-111111111111",
+        mediaContent: "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
     )
     var owned: [HelperOwnedMount] = [HelperOwnedMount(mountPoint: "/Volumes/NTFSLite-a", driverPID: 4242)]
+    var ownedReadCount = 0
+    var replacementOwnedAfterRead: Int?
     var unmountSucceeds = true
+    var clearOwnedOnUnmount = true
     var driverExits = true
     var ejectSucceeds = true
     var diskRemains = false
+    var presenceScript: [Bool?] = []
     var calls: [String] = []
 
     func volumeFacts(bsdName: String) async -> HelperVolumeFacts? {
@@ -16465,32 +17991,48 @@ final class FakeDiskReleaseSystem: DiskReleaseSystem, @unchecked Sendable {
         return switch bsdName {
         case "disk6": disk
         case "disk6s2": volume
-        case "disk6s1": HelperVolumeFacts(
-            bsdName: "disk6s1", wholeDiskBSDName: "disk6", isWholeDisk: false, isInternal: false,
-            isRemovable: true, isEjectable: true, deviceProtocol: "USB", fileSystemName: "msdos",
-            mountPoint: nil, isWritableMount: nil, volumeUUID: nil)
+        case "disk6s1": efi
         default: nil
         }
     }
+    func mediaTopology(diskBSDName: String) async -> HelperMediaTopology? {
+        topologyReadCount += 1
+        guard !removed, diskBSDName == "disk6" else { return nil }
+        if let replacementTopologyAfterRead, topologyReadCount > replacementTopologyAfterRead {
+            return helperMediaTopology(diskRegistryEntryID: 999)
+        }
+        return topology
+    }
     func partitions(ofDisk bsdName: String) async -> [String]? { bsdName == "disk6" ? ["disk6s1", "disk6s2"] : nil }
     func ownedFSKitMounts(devicePath: String) async -> [HelperOwnedMount]? {
-        devicePath == "/dev/disk6s2" ? owned : []
+        guard devicePath == "/dev/disk6s2" else { return [] }
+        ownedReadCount += 1
+        if let replacementOwnedAfterRead, ownedReadCount > replacementOwnedAfterRead {
+            return [HelperOwnedMount(mountPoint: "/Volumes/NewMount", driverPID: 4343)]
+        }
+        return owned
     }
     func unmountFileSystem(mountPoint: String) async -> Bool {
         calls.append("unmount:" + mountPoint)
-        if unmountSucceeds { owned.removeAll { $0.mountPoint == mountPoint } }
+        if unmountSucceeds && clearOwnedOnUnmount { owned.removeAll { $0.mountPoint == mountPoint } }
         return unmountSucceeds
     }
     func waitForDriverExit(pid: Int32) async -> Bool { calls.append("wait"); return driverExits }
     func removeEmptyMountPoint(_ path: String) async -> Bool { calls.append("rmdir"); return true }
-    func unmountNativeVolume(bsdName: String) async -> Bool {
+    func unmountNativeVolume(bsdName: String, expectedRegistryEntryID: UInt64) async -> Bool {
         calls.append("nativeUnmount:" + bsdName)
+        guard expectedRegistryEntryID == 602 else { return false }
         volume.mountPoint = nil
         return true
     }
-    func eject(diskBSDName: String) async -> Bool { calls.append("eject"); return ejectSucceeds }
-    func diskIsPresent(bsdName: String) async -> Bool {
-        removed ? false : (calls.contains("eject") ? diskRemains : true)
+    func eject(diskBSDName: String, expectedRegistryEntryID: UInt64) async -> Bool {
+        calls.append("eject")
+        return expectedRegistryEntryID == 600 && ejectSucceeds
+    }
+    func diskIsPresent(bsdName: String, registryEntryID: UInt64) async -> Bool? {
+        guard registryEntryID == 600 else { return nil }
+        if !presenceScript.isEmpty { return presenceScript.removeFirst() }
+        return removed ? false : (calls.contains("eject") ? diskRemains : true)
     }
     var removed = false
     var orphans: [HelperOwnedMount] = []
@@ -16499,7 +18041,7 @@ final class FakeDiskReleaseSystem: DiskReleaseSystem, @unchecked Sendable {
 }
 
 func diskReleaseExecutorUsesOnlyStandardReleaseAndFailsClosed() async {
-    let disk = try! HelperDiskInstanceIdentity(physicalDiskBSDName: "disk6", mediaGeneration: 1)
+    let disk = helperDiskTarget()
     let volume = writableMountTarget()
     let ok = HelperResponseEnvelope(resultCode: .succeeded, exitStatus: 0)
 
@@ -16512,6 +18054,7 @@ func diskReleaseExecutorUsesOnlyStandardReleaseAndFailsClosed() async {
     let native = FakeDiskReleaseSystem()
     native.owned = []
     native.volume.mountPoint = "/Volumes/NTFSLAB"
+    native.volume.volumeUUID = volume.volumeUUID
     let nativeResult = await DiskReleaseExecutor.unmountVolume(target: volume, system: native)
     expect(nativeResult == ok
            && native.calls == ["nativeUnmount:disk6s2"],
@@ -16531,11 +18074,23 @@ func diskReleaseExecutorUsesOnlyStandardReleaseAndFailsClosed() async {
                 failed(.notExternalRemovable), "an internal volume must not be touched")
     await check({ $0.volume.wholeDiskBSDName = "disk7" }, { await DiskReleaseExecutor.unmountVolume(target: volume, system: $0) },
                 failed(.targetMismatch), "a volume on another disk must not be touched")
+    await check({ system in
+        system.owned = []
+        system.volume.mountPoint = "/Volumes/NTFSLAB"
+        system.volume.volumeUUID = "99999999-2222-3333-4444-555555555555"
+    }, { await DiskReleaseExecutor.unmountVolume(target: volume, system: $0) },
+    failed(.targetMismatch), "a native mount with another filesystem UUID must not be unmounted")
+    await check({ $0.replacementOwnedAfterRead = 1 },
+                { await DiskReleaseExecutor.unmountVolume(target: volume, system: $0) },
+                failed(.ambiguousMount), "a changed owned FSKit mount must not be unmounted using stale preflight facts")
     await check({ $0.owned.append(HelperOwnedMount(mountPoint: "/Volumes/NTFSLite-b", driverPID: 4343)) },
                 { await DiskReleaseExecutor.unmountVolume(target: volume, system: $0) },
                 failed(.ambiguousMount), "two mounts for one partition must stop instead of guessing")
     await check({ $0.unmountSucceeds = false }, { await DiskReleaseExecutor.unmountVolume(target: volume, system: $0) },
-                failed(.unmountRefused), "a busy volume must be reported, never forced")
+                changed(.unmountRefused), "a busy volume must be reported, never forced")
+    await check({ $0.clearOwnedOnUnmount = false },
+                { await DiskReleaseExecutor.unmountVolume(target: volume, system: $0) },
+                changed(.stillMounted), "a standard unmount callback alone cannot certify that the FSKit mount disappeared")
     await check({ $0.driverExits = false }, { await DiskReleaseExecutor.unmountVolume(target: volume, system: $0) },
                 changed(.driverNotExited), "a driver that has not exited must be reported without termination")
 
@@ -16544,19 +18099,63 @@ func diskReleaseExecutorUsesOnlyStandardReleaseAndFailsClosed() async {
     expect(wholeResult == ok
            && whole.calls.contains("unmount:/Volumes/NTFSLite-a"),
            "unmounting a disk must release the helper's FSKit mounts on its partitions")
+    let wholeStillMounted = FakeDiskReleaseSystem()
+    wholeStillMounted.clearOwnedOnUnmount = false
+    let wholeStillMountedResult = await DiskReleaseExecutor.unmountDisk(target: disk, system: wholeStillMounted)
+    expect(wholeStillMountedResult == changed(.stillMounted),
+           "whole-disk unmount must reread every partition before claiming success")
+
+    let replaced = FakeDiskReleaseSystem()
+    replaced.topology = helperMediaTopology(diskRegistryEntryID: 999)
+    let replacedResult = await DiskReleaseExecutor.unmountDisk(target: disk, system: replaced)
+    expect(replacedResult == failed(.targetMismatch) && replaced.calls.isEmpty,
+           "a replaced whole-disk object cannot unmount any partition")
+    let extra = FakeDiskReleaseSystem()
+    extra.topology = helperMediaTopology(extraPartition: true)
+    let extraResult = await DiskReleaseExecutor.unmountDisk(target: disk, system: extra)
+    expect(extraResult == failed(.targetMismatch) && extra.calls.isEmpty,
+           "an unlisted sibling cannot be unmounted")
+    let changedDuringPreflight = FakeDiskReleaseSystem()
+    changedDuringPreflight.replacementTopologyAfterRead = 1
+    let changedDuringResult = await DiskReleaseExecutor.unmountVolume(target: volume, system: changedDuringPreflight)
+    expect(changedDuringResult == failed(.targetMismatch) && changedDuringPreflight.calls.isEmpty,
+           "even a single-volume unmount must refuse a replaced whole-disk object")
+    let mountedEFI = FakeDiskReleaseSystem()
+    mountedEFI.efi.mountPoint = "/Volumes/EFI"
+    let mountedResult = await DiskReleaseExecutor.unmountDisk(target: disk, system: mountedEFI)
+    expect(mountedResult == failed(.stillMounted) && mountedEFI.calls.isEmpty,
+           "a mounted EFI sibling must block the whole-disk operation before any unmount")
 
     let eject = FakeDiskReleaseSystem()
     eject.owned = []
     let ejectResult = await DiskReleaseExecutor.ejectDisk(target: disk, system: eject)
     expect(ejectResult == ok && eject.calls == ["eject"],
            "an unmounted external disk is ejected with the standard request")
+    let transientAbsence = FakeDiskReleaseSystem()
+    transientAbsence.owned = []
+    transientAbsence.presenceScript = [false] + Array(repeating: true, count: 40)
+    let transientResult = await DiskReleaseExecutor.ejectDisk(target: disk, system: transientAbsence)
+    expect(transientResult == changed(.ejectNotConfirmed),
+           "one transient absent reading must not declare a standard eject confirmed")
+    let unknownPresence = FakeDiskReleaseSystem()
+    unknownPresence.owned = []
+    unknownPresence.presenceScript = [nil, false, false]
+    let unknownResult = await DiskReleaseExecutor.ejectDisk(target: disk, system: unknownPresence)
+    expect(unknownResult == changed(.factsUnavailable),
+           "an unreadable presence check after eject must fail closed instead of claiming safe removal")
+    let changedBeforeEject = FakeDiskReleaseSystem()
+    changedBeforeEject.owned = []
+    changedBeforeEject.replacementTopologyAfterRead = 2
+    let changedBeforeEjectResult = await DiskReleaseExecutor.ejectDisk(target: disk, system: changedBeforeEject)
+    expect(changedBeforeEjectResult == failed(.targetMismatch) && !changedBeforeEject.calls.contains("eject"),
+           "a changed whole-disk instance at the final eject preflight must stop before eject")
     await check({ _ in }, { await DiskReleaseExecutor.ejectDisk(target: disk, system: $0) },
                 failed(.stillMounted), "a disk with a mounted partition must not be ejected")
     await check({ $0.owned = []; $0.volume.mountPoint = "/Volumes/NTFSLAB" },
                 { await DiskReleaseExecutor.ejectDisk(target: disk, system: $0) },
                 failed(.stillMounted), "a native mount also blocks eject")
     await check({ $0.owned = []; $0.ejectSucceeds = false }, { await DiskReleaseExecutor.ejectDisk(target: disk, system: $0) },
-                failed(.ejectRefused), "a refused eject is reported without forcing")
+                changed(.ejectRefused), "a refused eject is reported without forcing")
     await check({ $0.owned = []; $0.diskRemains = true }, { await DiskReleaseExecutor.ejectDisk(target: disk, system: $0) },
                 changed(.ejectNotConfirmed), "eject success requires the disk to disappear from fresh facts")
     await check({ $0.disk.deviceProtocol = "Disk Image" }, { await DiskReleaseExecutor.ejectDisk(target: disk, system: $0) },
@@ -16567,9 +18166,9 @@ func diskReleaseExecutorUsesOnlyStandardReleaseAndFailsClosed() async {
     let cleaned = await DiskReleaseExecutor.unmountDisk(target: disk, system: unplugged)
     unplugged.orphans = []
     let gone = await DiskReleaseExecutor.ejectDisk(target: disk, system: unplugged)
-    expect(cleaned == ok && gone == ok
-           && unplugged.calls == ["unmount:/Volumes/NTFSLAB", "wait", "rmdir"],
-           "a disk pulled while writable leaves only our driver's mount, which is released normally")
+    expect(cleaned == failed(.factsUnavailable) && gone == failed(.factsUnavailable)
+           && unplugged.calls.isEmpty,
+           "an absent disk cannot prove the requested media instance, so no orphan is unmounted")
     let stuck = FakeDiskReleaseSystem()
     stuck.removed = true
     stuck.orphans = [HelperOwnedMount(mountPoint: "/Volumes/NTFSLAB", driverPID: 5151)]
@@ -16579,8 +18178,8 @@ func diskReleaseExecutorUsesOnlyStandardReleaseAndFailsClosed() async {
     let present = FakeDiskReleaseSystem()
     present.volume.isInternal = true
     let internalResult = await DiskReleaseExecutor.unmountDisk(target: disk, system: present)
-    expect(internalResult == failed(.notExternalRemovable) || internalResult == ok,
-           "a present disk is never treated as removed")
+    expect(internalResult == failed(.notExternalRemovable) && present.calls.isEmpty,
+           "an internal sibling must fail before any whole-disk release")
 }
 
 await diskReleaseExecutorUsesOnlyStandardReleaseAndFailsClosed()
@@ -16611,32 +18210,151 @@ func helperReply(_ code: HelperResultCode, _ status: Int32) -> HelperTransportRe
     .reply(try! JSONEncoder().encode(HelperResponseEnvelope(resultCode: code, exitStatus: status)))
 }
 
+func writeSessionObservation(_ volume: VolumeInstanceID, includeEFI: Bool = true) -> DiskInventoryObservation {
+    let diskName = volume.diskInstanceID.physicalDiskID.rawValue
+    let target = ReadOnlyVolumeMapper.map(
+        ReadOnlyVolumeEvidence(
+            bsdName: volume.volumeID.bsdName, volumeUUID: volume.volumeID.uuid,
+            physicalDiskBSDName: diskName, displayName: "NTFSLAB",
+            fileSystemName: "ntfs", isInternal: false, roleEvidence: .unknown,
+            diskArbitrationMountPoint: "/Volumes/NTFSLAB",
+            mediaUUID: "90200000-0000-0000-0000-000000000002",
+            mediaContent: "Windows_NTFS",
+            mediaContentHint: "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7",
+            mediaRegistryID: 902
+        ),
+        mount: ReadOnlyMountEvidence(
+            sourceBSDName: volume.volumeID.bsdName,
+            mountPoint: "/Volumes/NTFSLAB", access: .readOnly,
+            backend: .unknown, isComplete: true, isCanonical: true,
+            isSymlink: false
+        ),
+        mediaGeneration: volume.diskInstanceID.mediaGeneration
+    )
+    let efi = ReadOnlyVolumeMapper.map(
+        ReadOnlyVolumeEvidence(
+            bsdName: diskName + "s1", volumeUUID: nil,
+            physicalDiskBSDName: diskName, displayName: "EFI",
+            fileSystemName: "msdos", isInternal: false, roleEvidence: .unknown,
+            diskArbitrationMountPoint: nil,
+            mediaUUID: "90100000-0000-0000-0000-000000000001",
+            mediaContent: "C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
+            mediaContentHint: "C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
+            mediaRegistryID: 901
+        ),
+        mount: nil,
+        mediaGeneration: volume.diskInstanceID.mediaGeneration
+    )
+    return DiskInventoryObservation(
+        physicalDisks: [ReadOnlyPhysicalDiskRecord(
+            instanceID: volume.diskInstanceID,
+            description: DiskArbitrationDescription(
+                bsdName: diskName, physicalDiskBSDName: diskName,
+                isWholeDisk: true, isInternal: false,
+                isEjectable: true, isRemovable: true,
+                mediaSize: 1_000_000, mediaUUID: nil,
+                volumeUUID: nil, volumeName: nil,
+                fileSystemName: nil, mountPoint: nil,
+                mediaContent: "GUID_partition_scheme", mediaRegistryID: 900
+            ),
+            volumes: includeEFI ? [efi, target] : [target], issues: []
+        )],
+        issues: []
+    )
+}
+
 func writeSessionSendsOnlyConfirmedExclusiveFixedRequests() async {
     let volume = VolumeInstanceID(
-        volumeID: VolumeID(uuid: "4E6D1FC6-D631-3BD7-AE52-E7FCA880A904", bsdName: "disk6s2"),
+        volumeID: VolumeID(uuid: "4e6d1fc6-d631-3bd7-ae52-e7fca880a904", bsdName: "disk6s2"),
         diskInstanceID: DiskInstanceID(physicalDiskID: PhysicalDiskID(rawValue: "disk6"), mediaGeneration: MediaGeneration(rawValue: 3))
     )
+    let observation = writeSessionObservation(volume)
+    let binding = WriteSession.diskIdentity(volume.diskInstanceID, target: volume, in: observation)
+    expect(binding?.registryEntryID == 900 && binding?.partitions.count == 2,
+           "one-time write binding must include the whole-disk object and exact EFI + NTFS set")
+    guard let binding else { fatalError("CHECK FAILED: exact write binding fixture") }
+    let hiddenAfterFSKitMount = DiskInventoryObservation(
+        physicalDisks: [ReadOnlyPhysicalDiskRecord(
+            instanceID: volume.diskInstanceID,
+            description: observation.physicalDisks[0].description,
+            volumes: [], issues: []
+        )],
+        issues: []
+    )
+    expect(WriteSession.canOfferSessionEject(
+        volume.diskInstanceID, binding: binding, in: hiddenAfterFSKitMount
+    ), "a verified disk should retain its current-session eject entrance when FSKit hides the original volume row")
+    let replacementBinding = try! HelperDiskInstanceIdentity(
+        physicalDiskBSDName: binding.physicalDiskBSDName,
+        mediaGeneration: binding.mediaGeneration,
+        registryEntryID: 999,
+        mediaContent: binding.mediaContent,
+        partitions: binding.partitions
+    )
+    expect(!WriteSession.canOfferSessionEject(
+        volume.diskInstanceID, binding: replacementBinding, in: hiddenAfterFSKitMount
+    ), "a different IOMedia instance must revoke the session eject entrance")
+    let mountedEFI = ReadOnlyVolumeMapper.map(
+        ReadOnlyVolumeEvidence(
+            bsdName: "disk6s1", volumeUUID: nil,
+            physicalDiskBSDName: "disk6", displayName: "EFI",
+            fileSystemName: "msdos", isInternal: false, roleEvidence: .unknown,
+            diskArbitrationMountPoint: "/Volumes/EFI",
+            mediaUUID: "90100000-0000-0000-0000-000000000001",
+            mediaContent: "C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
+            mediaContentHint: "C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
+            mediaRegistryID: 901
+        ),
+        mount: ReadOnlyMountEvidence(
+            sourceBSDName: "disk6s1", mountPoint: "/Volumes/EFI",
+            access: .readOnly, backend: .unknown, isComplete: true,
+            isCanonical: true, isSymlink: false
+        ),
+        mediaGeneration: volume.diskInstanceID.mediaGeneration
+    )
+    let knownMountedSibling = DiskInventoryObservation(
+        physicalDisks: [ReadOnlyPhysicalDiskRecord(
+            instanceID: volume.diskInstanceID,
+            description: observation.physicalDisks[0].description,
+            volumes: [mountedEFI], issues: []
+        )], issues: []
+    )
+    expect(!WriteSession.canOfferSessionEject(
+        volume.diskInstanceID, binding: binding, in: knownMountedSibling
+    ), "a known mounted EFI sibling must remove the session eject entrance")
+    let prematureEjectTransport = FakeHelperTransport([helperReply(.succeeded, 0)])
+    let prematureEject = await WriteSession(transport: prematureEjectTransport)
+        .safeEject(volume.diskInstanceID, in: observation)
+    expect(prematureEject == .refused(.identityInvalid)
+           && prematureEjectTransport.actions.isEmpty,
+           "an unknown-role candidate cannot request whole-disk eject before a successful write session")
+    let unboundTransport = FakeHelperTransport([helperReply(.succeeded, 0)])
+    let unboundWrite = await WriteSession(transport: unboundTransport).enableWriting(
+        volume, in: hiddenAfterFSKitMount, confirmedAsDataVolume: true
+    )
+    expect(unboundWrite == .refused(.identityInvalid) && unboundTransport.actions.isEmpty,
+           "a declaration with no current target and exact partition binding cannot reach the helper")
 
     let unconfirmed = FakeHelperTransport([helperReply(.succeeded, 0)])
-    let refused = await WriteSession(transport: unconfirmed).enableWriting(volume, confirmedAsDataVolume: false)
+    let refused = await WriteSession(transport: unconfirmed).enableWriting(volume, in: observation, confirmedAsDataVolume: false)
     expect(refused == .refused(.notConfirmed) && unconfirmed.actions.isEmpty,
            "writing must never be requested without the user's data-volume confirmation")
 
     let transport = FakeHelperTransport([helperReply(.succeeded, 0), helperReply(.succeeded, 0)])
     let session = WriteSession(transport: transport)
-    let enabled = await session.enableWriting(volume, confirmedAsDataVolume: true)
+    let enabled = await session.enableWriting(volume, in: observation, confirmedAsDataVolume: true)
     let writable = await session.writableVolumes()
     expect(enabled == .writingEnabled && transport.actions == ["mountReadWrite"] && writable == [volume],
            "a confirmed request sends exactly one fixed mountReadWrite action")
-    _ = await session.enableWriting(volume, confirmedAsDataVolume: true)
+    _ = await session.enableWriting(volume, in: observation, confirmedAsDataVolume: true)
     expect(Set(transport.operationIDs).count == 2, "every request carries a fresh one-shot operation ID")
 
     let busyTransport = FakeHelperTransport([helperReply(.succeeded, 0), helperReply(.succeeded, 0)])
     busyTransport.holdFirst = true
     let busySession = WriteSession(transport: busyTransport)
-    let first = Task { await busySession.enableWriting(volume, confirmedAsDataVolume: true) }
+    let first = Task { await busySession.enableWriting(volume, in: observation, confirmedAsDataVolume: true) }
     while busyTransport.gate == nil { await Task.yield() }
-    let second = await busySession.safeEject(volume.diskInstanceID)
+    let second = await busySession.safeEject(volume.diskInstanceID, in: observation)
     busyTransport.gate?.resume()
     _ = await first.value
     expect(second == .refused(.diskBusy) && busyTransport.actions == ["mountReadWrite"],
@@ -16648,27 +18366,134 @@ func writeSessionSendsOnlyConfirmedExclusiveFixedRequests() async {
         (.reply(Data("{}".utf8)), .needsRefresh(.invalidResponse)),
         (helperReply(.executionFailed, WritableMountFailure.healthNotClean.rawValue), .refused(.mount(.healthNotClean))),
         (helperReply(.postconditionFailed, WritableMountFailure.healthNotClean.rawValue), .needsRefresh(.mount(.healthNotClean))),
+        (helperReply(.rejectedDiskBusy, 1), .refused(.diskBusy)),
+        (helperReply(.rejectedUnsupportedSchema, 1), .refused(.helperVersionMismatch)),
         (helperReply(.rejectedReplayedOperation, 1), .refused(.requestRejected)),
     ] {
-        let result = await WriteSession(transport: FakeHelperTransport([reply])).enableWriting(volume, confirmedAsDataVolume: true)
+        let result = await WriteSession(transport: FakeHelperTransport([reply])).enableWriting(volume, in: observation, confirmedAsDataVolume: true)
         expect(result == expected, "helper replies must map to fixed outcomes; unknown delivery is never retried")
     }
 
-    let eject = FakeHelperTransport([helperReply(.succeeded, 0), helperReply(.succeeded, 0)])
-    let ejected = await WriteSession(transport: eject).safeEject(volume.diskInstanceID)
-    expect(ejected == .ejected && eject.actions == ["unmountDisk", "ejectDisk"],
-           "safe eject unmounts the whole disk before requesting eject")
+    let uncertainTransport = FakeHelperTransport([.timedOut, helperReply(.succeeded, 0)])
+    let uncertainSession = WriteSession(transport: uncertainTransport)
+    let uncertainFirst = await uncertainSession.enableWriting(volume, in: observation, confirmedAsDataVolume: true)
+    let uncertainSecond = await uncertainSession.safeEject(volume.diskInstanceID, in: observation)
+    expect(uncertainFirst == .needsRefresh(.helperTimedOut)
+           && uncertainSecond == .refused(.diskBusy)
+           && uncertainTransport.actions == ["mountReadWrite"],
+           "an unknown helper result must keep the disk closed to later requests")
+    let replacement = DiskInstanceID(
+        physicalDiskID: volume.diskInstanceID.physicalDiskID,
+        mediaGeneration: MediaGeneration(rawValue: volume.diskInstanceID.mediaGeneration.rawValue + 1)
+    )
+    let replacementAttempt = await uncertainSession.safeEject(replacement, in: observation)
+    expect(replacementAttempt == .refused(.diskBusy)
+           && uncertainTransport.actions == ["mountReadWrite"],
+           "a reused BSD name cannot bypass an unresolved helper operation after media replacement")
 
-    let busyUnmount = FakeHelperTransport([helperReply(.executionFailed, DiskReleaseFailure.unmountRefused.rawValue)])
-    let busyResult = await WriteSession(transport: busyUnmount).safeEject(volume.diskInstanceID)
-    expect(busyResult == .refused(.release(.unmountRefused)) && busyUnmount.actions == ["unmountDisk"],
-           "a busy volume stops safe eject before any eject request")
+    let eject = FakeHelperTransport([helperReply(.succeeded, 0), helperReply(.succeeded, 0), helperReply(.succeeded, 0)])
+    let ejectSession = WriteSession(transport: eject)
+    _ = await ejectSession.enableWriting(volume, in: observation, confirmedAsDataVolume: true)
+    let ejected = await ejectSession.safeEject(volume.diskInstanceID, in: observation)
+    expect(ejected == .ejected && eject.actions == ["mountReadWrite", "unmountDisk", "ejectDisk"],
+           "safe eject of a confirmed session unmounts the whole disk before requesting eject")
+
+    let busyUnmount = FakeHelperTransport([helperReply(.succeeded, 0), helperReply(.executionFailed, DiskReleaseFailure.unmountRefused.rawValue)])
+    let busyUnmountSession = WriteSession(transport: busyUnmount)
+    _ = await busyUnmountSession.enableWriting(volume, in: observation, confirmedAsDataVolume: true)
+    let busyResult = await busyUnmountSession.safeEject(volume.diskInstanceID, in: observation)
+    let busyRetry = await busyUnmountSession.safeEject(volume.diskInstanceID, in: observation)
+    expect(busyResult == .needsRefresh(.release(.unmountRefused))
+           && busyUnmount.actions == ["mountReadWrite", "unmountDisk"],
+           "a failed whole-disk unmount stops eject while preserving possible sibling changes")
+    expect(busyRetry == .refused(.diskBusy),
+           "a failed whole-disk unmount may have changed sibling mounts and must close the session")
+
+    let partialTransport = FakeHelperTransport([
+        helperReply(.succeeded, 0), helperReply(.succeeded, 0), .unavailable,
+    ])
+    let partialSession = WriteSession(transport: partialTransport)
+    _ = await partialSession.enableWriting(volume, in: observation, confirmedAsDataVolume: true)
+    let partialResult = await partialSession.safeEject(volume.diskInstanceID, in: observation)
+    let partialRetry = await partialSession.safeEject(volume.diskInstanceID, in: observation)
+    expect(partialResult == .needsRefresh(.helperUnavailable)
+           && partialRetry == .refused(.diskBusy)
+           && partialTransport.actions == ["mountReadWrite", "unmountDisk", "ejectDisk"],
+           "any failure after a completed unmount is a changed state and cannot be retried")
 
     expect(WriteOutcomeText.text(.refused(.mount(.healthNotClean))).contains("Windows")
            && WriteOutcomeText.text(.ejected).contains("拔出")
-           && WriteOutcomeText.text(.needsRefresh(.helperTimedOut)).contains("重新读取"),
+           && WriteOutcomeText.text(.needsRefresh(.helperTimedOut)).contains("重新读取")
+           && WriteOutcomeText.text(.refused(.mount(.fsKitUnavailable))).contains("运行环境"),
            "outcomes must be explained in fixed user-facing text")
+    let overlappingText = WriteOutcomeText.text(.refused(.diskBusy))
+    expect(overlappingText.contains("本次请求未执行") && !overlappingText.contains("未进行任何更改"),
+           "a cross-window busy refusal must not imply the other operation left disk state unchanged")
+    let partialEjectText = WriteOutcomeText.text(.needsRefresh(.release(.ejectRefused)))
+    expect(partialEjectText.contains("状态尚未确认") && !partialEjectText.contains("未进行任何更改"),
+           "eject refusal after unmount must not claim that nothing changed")
+    let enabledText = WriteOutcomeText.text(.writingEnabled)
+    expect(enabledText.contains("访达") && !enabledText.contains("原卷名"),
+           "Finder guidance must not promise the original label when the helper can rename a mount")
+    let uncertainText = WriteOutcomeText.text(.needsRefresh(.helperTimedOut))
+    expect(uncertainText.contains("请勿直接拔出") && !uncertainText.contains("重新插拔后再试"),
+           "unknown helper completion must never tell the user to reconnect or retry")
+    let outdatedHelperText = WriteOutcomeText.text(.refused(.helperVersionMismatch))
+    expect(outdatedHelperText.contains("版本不匹配")
+        && outdatedHelperText.contains("运行环境")
+        && outdatedHelperText.contains("重新启用或更新帮助程序"),
+        "an old helper must receive clear version and recovery guidance")
 }
 
 await writeSessionSendsOnlyConfirmedExclusiveFixedRequests()
 print("PASS: write session requires confirmation, serializes per disk, uses fresh IDs and never retries unknown delivery")
+
+func writeInteractionLedgerKeepsUnknownDisksClosedAndDropsAbsentRecords() {
+    let volume = makeSnapshot(
+        uuid: "00000000-0000-0000-0000-000000000510",
+        bsdName: "disk510s1",
+        displayName: "WORK",
+        physicalDiskID: PhysicalDiskID(rawValue: "disk510")
+    ).instanceID
+    let disk = volume.diskInstanceID
+
+    var ledger = WriteInteractionLedger()
+    ledger.recordEnable(.writingEnabled, for: volume)
+    expect(ledger.writableVolumes.contains(volume), "a verified helper result is visible for this session")
+    ledger.reconcileObservedDisks([], coverageVerified: false)
+    expect(ledger.writableVolumes.contains(volume), "an incomplete scan cannot prove the disk disappeared")
+    ledger.reconcileObservedDisks([], coverageVerified: true)
+    expect(!ledger.writableVolumes.contains(volume), "verified absence must remove stale writable records")
+
+    ledger.recordEnable(.needsRefresh(.helperTimedOut), for: volume)
+    expect(!ledger.canStartOperation(on: disk), "unknown helper completion must close further disk operations")
+    ledger.reconcileObservedDisks([disk], coverageVerified: true)
+    expect(!ledger.canStartOperation(on: disk), "an ordinary refresh cannot prove mutation quiescence")
+
+    let otherDisk = DiskInstanceID(
+        physicalDiskID: disk.physicalDiskID,
+        mediaGeneration: MediaGeneration(rawValue: disk.mediaGeneration.rawValue + 1)
+    )
+    expect(!ledger.canStartOperation(on: otherDisk),
+           "a new media generation cannot prove a timed-out helper has stopped using the same BSD name")
+
+    var ejectLedger = WriteInteractionLedger()
+    ejectLedger.recordEnable(.writingEnabled, for: volume)
+    ejectLedger.recordEject(.refused(.helperVersionMismatch), for: disk)
+    expect(ejectLedger.writableVolumes.contains(volume)
+        && ejectLedger.canStartOperation(on: disk),
+        "an old helper's pre-admission schema refusal must not claim that unmount changed the disk")
+    ejectLedger.recordEject(.refused(.release(.ejectRefused)), for: disk)
+    expect(!ejectLedger.writableVolumes.contains(volume), "failed eject may already have unmounted the volume")
+    expect(!ejectLedger.canStartOperation(on: disk), "partial eject cannot expose a retry before reconciliation")
+
+    var unavailableLedger = WriteInteractionLedger()
+    unavailableLedger.recordEnable(.writingEnabled, for: volume)
+    unavailableLedger.recordEject(.refused(.helperUnavailable), for: disk)
+    expect(unavailableLedger.writableVolumes.contains(volume)
+           && unavailableLedger.canStartOperation(on: disk),
+           "a provably undelivered eject must retain the session record for recovery")
+}
+
+writeInteractionLedgerKeepsUnknownDisksClosedAndDropsAbsentRecords()
+print("PASS: write UI locks unknown outcomes and removes records only after verified absence")

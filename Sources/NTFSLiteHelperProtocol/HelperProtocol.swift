@@ -3,6 +3,7 @@ import NTFSLiteStrictJSON
 
 public enum HelperProtocolVersion: UInt16, Codable, Equatable, Sendable {
     case v1 = 1
+    case v2 = 2
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
@@ -86,27 +87,95 @@ public struct HelperOperationID: Codable, Equatable, Hashable, Sendable {
     }
 }
 
+public enum HelperPartitionKind: String, Codable, Equatable, Sendable {
+    case efiSystem
+    case ntfsTarget
+}
+
+/// One partition in the exact GPT layout observed by the App. The helper
+/// compares every field against a fresh IOMedia/Disk Arbitration read.
+public struct HelperPartitionIdentity: Codable, Equatable, Sendable {
+    public let bsdName: String
+    public let registryEntryID: UInt64
+    public let mediaUUID: String
+    public let contentHint: String
+    public let kind: HelperPartitionKind
+
+    public init(
+        bsdName: String,
+        registryEntryID: UInt64,
+        mediaUUID: String,
+        contentHint: String,
+        kind: HelperPartitionKind
+    ) throws {
+        guard bsdName.range(of: #"^disk[0-9]+s[0-9]+$"#, options: .regularExpression) != nil,
+              registryEntryID > 0,
+              let uuid = canonicalUUIDString(mediaUUID),
+              let hint = canonicalUUIDString(contentHint),
+              uuid != "00000000-0000-0000-0000-000000000000",
+              hint != "00000000-0000-0000-0000-000000000000",
+              (kind == .efiSystem && hint == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b")
+                || (kind == .ntfsTarget && hint == "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7")
+        else { throw HelperRequestRejection.invalidIdentity }
+        self.bsdName = bsdName
+        self.registryEntryID = registryEntryID
+        self.mediaUUID = uuid
+        self.contentHint = hint
+        self.kind = kind
+    }
+
+    public init(from decoder: Decoder) throws {
+        try rejectUnexpectedKeys(from: decoder, allowed: ["bsdName", "registryEntryID", "mediaUUID", "contentHint", "kind"])
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            bsdName: container.decode(String.self, forKey: .bsdName),
+            registryEntryID: container.decode(UInt64.self, forKey: .registryEntryID),
+            mediaUUID: container.decode(String.self, forKey: .mediaUUID),
+            contentHint: container.decode(String.self, forKey: .contentHint),
+            kind: container.decode(HelperPartitionKind.self, forKey: .kind)
+        )
+    }
+}
+
 public struct HelperDiskInstanceIdentity: Codable, Equatable, Sendable {
     public let physicalDiskBSDName: String
     public let mediaGeneration: UInt64
+    public let registryEntryID: UInt64
+    public let mediaContent: String
+    public let partitions: [HelperPartitionIdentity]
 
     public init(
         physicalDiskBSDName: String,
-        mediaGeneration: UInt64
+        mediaGeneration: UInt64,
+        registryEntryID: UInt64,
+        mediaContent: String,
+        partitions: [HelperPartitionIdentity]
     ) throws {
         guard isValidWholeDiskBSDName(physicalDiskBSDName),
-              mediaGeneration > 0
+              mediaGeneration > 0, registryEntryID > 0,
+              mediaContent == "GUID_partition_scheme",
+              (1...2).contains(partitions.count),
+              partitions == partitions.sorted(by: { $0.bsdName < $1.bsdName }),
+              partitions.count(where: { $0.kind == .ntfsTarget }) == 1,
+              partitions.count(where: { $0.kind == .efiSystem }) <= 1,
+              Set(partitions.map(\.bsdName)).count == partitions.count,
+              Set(partitions.map(\.registryEntryID)).count == partitions.count,
+              Set(partitions.map(\.mediaUUID)).count == partitions.count,
+              partitions.allSatisfy({ isValidVolumeBSDName($0.bsdName, on: physicalDiskBSDName) })
         else {
             throw HelperRequestRejection.invalidIdentity
         }
         self.physicalDiskBSDName = physicalDiskBSDName
         self.mediaGeneration = mediaGeneration
+        self.registryEntryID = registryEntryID
+        self.mediaContent = mediaContent
+        self.partitions = partitions
     }
 
     public init(from decoder: Decoder) throws {
         try rejectUnexpectedKeys(
             from: decoder,
-            allowed: ["physicalDiskBSDName", "mediaGeneration"]
+            allowed: ["physicalDiskBSDName", "mediaGeneration", "registryEntryID", "mediaContent", "partitions"]
         )
         let container = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(
@@ -117,13 +186,19 @@ public struct HelperDiskInstanceIdentity: Codable, Equatable, Sendable {
             mediaGeneration: container.decode(
                 UInt64.self,
                 forKey: .mediaGeneration
-            )
+            ),
+            registryEntryID: container.decode(UInt64.self, forKey: .registryEntryID),
+            mediaContent: container.decode(String.self, forKey: .mediaContent),
+            partitions: container.decode([HelperPartitionIdentity].self, forKey: .partitions)
         )
     }
 
     private enum CodingKeys: String, CodingKey {
         case physicalDiskBSDName
         case mediaGeneration
+        case registryEntryID
+        case mediaContent
+        case partitions
     }
 }
 
@@ -138,7 +213,8 @@ public struct HelperVolumeInstanceIdentity: Codable, Equatable, Sendable {
         disk: HelperDiskInstanceIdentity
     ) throws {
         guard let canonicalUUID = canonicalUUIDString(volumeUUID),
-              isValidVolumeBSDName(volumeBSDName, on: disk.physicalDiskBSDName)
+              isValidVolumeBSDName(volumeBSDName, on: disk.physicalDiskBSDName),
+              disk.partitions.contains(where: { $0.bsdName == volumeBSDName && $0.kind == .ntfsTarget })
         else {
             throw HelperRequestRejection.invalidIdentity
         }
@@ -264,7 +340,7 @@ public struct HelperRequestEnvelope: Encodable, Equatable, Sendable {
         guard action.accepts(target) else {
             throw HelperRequestRejection.actionTargetMismatch
         }
-        self.schemaVersion = .v1
+        self.schemaVersion = .v2
         self.operationID = operationID
         self.action = action
         self.target = target
@@ -405,6 +481,7 @@ public enum HelperResultCode: Int32, Codable, Equatable, Sendable {
     case rejectedUnexpectedField = 16
     case rejectedActionTargetMismatch = 17
     case rejectedOperationCapacity = 18
+    case rejectedDiskBusy = 19
     case executionFailed = 20
     case postconditionFailed = 21
 
@@ -452,9 +529,8 @@ public struct HelperResponseEnvelope: Codable, Equatable, Sendable {
             UInt16.self,
             forKey: .schemaVersion
         )
-        guard let schemaVersion = HelperProtocolVersion(
-            rawValue: rawSchemaVersion
-        ) else {
+        guard let schemaVersion = HelperProtocolVersion(rawValue: rawSchemaVersion),
+              schemaVersion == .v1 else {
             throw HelperResponseRejection.unsupportedSchemaVersion
         }
 
@@ -540,6 +616,7 @@ private extension HelperResultCode {
             .rejectedUnexpectedField,
             .rejectedActionTargetMismatch,
             .rejectedOperationCapacity,
+            .rejectedDiskBusy,
             .executionFailed:
             exitStatus != 0
         }

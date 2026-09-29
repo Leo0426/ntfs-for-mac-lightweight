@@ -1,6 +1,7 @@
 import Darwin
 import DiskArbitration
 import Foundation
+import IOKit
 import NTFSLiteHelperExecution
 import NTFSLiteHelperProtocol
 import NTFSLiteSystem
@@ -14,6 +15,8 @@ final class LiveWritableMountSystem: WritableMountSystem, @unchecked Sendable {
     static let driverOptions = "rw,no_def_opts,silent,backend=fskit,norecover,no_detach,local"
     static let driverIdentifier = "com.leolu.ntfslite.ntfs-3g"
     static let probeIdentifier = "com.leolu.ntfslite.ntfs-3g.probe"
+    private static let diskCallbacks = HelperOneShotCallbackRegistry()
+    private static let diskCallbackTimeout: Duration = .seconds(60)
 
     private let helpersDirectory: URL
     private let executablePath: String
@@ -49,9 +52,18 @@ final class LiveWritableMountSystem: WritableMountSystem, @unchecked Sendable {
         let name = withExtendedLifetime(disk) { DADiskGetBSDName(disk).map { String(cString: $0) } }
         let mountPoint = (description[kDADiskDescriptionVolumePathKey as String] as? URL)?.path
         var writable: Bool?
-        var uuid = (description[kDADiskDescriptionVolumeUUIDKey as String]).map { CFUUIDCreateString(nil, ($0 as! CFUUID)) as String }
-        if let mountPoint, var info = Self.statfsEntry(mountPoint: mountPoint) {
-            guard Self.string(&info.f_mntfromname) == "/dev/" + bsdName else { return nil }
+        var uuid = Self.uuid(for: kDADiskDescriptionVolumeUUIDKey, in: description)
+        if let mountPoint {
+            guard var info = Self.statfsEntry(mountPoint: mountPoint) else { return nil }
+            let source = Self.string(&info.f_mntfromname)
+            let devicePath = "/dev/" + bsdName
+            let virtualSource = source != devicePath
+            let placeholder = virtualSource ? await isFSKitPlaceholder(source: source) : false
+            let owned = virtualSource ? await ownedFSKitMounts(devicePath: devicePath) : nil
+            guard HelperMountSourceBinding.accepts(
+                source: source, devicePath: devicePath, mountPoint: mountPoint,
+                ownedMounts: owned, isFSKitPlaceholder: placeholder
+            ) else { return nil }
             writable = info.f_flags & UInt32(MNT_RDONLY) == 0
             // FSKit mounts are per user; root is refused, so read as the mount user.
             if uuid == nil, let result = await runAsMountUser(.volumeUUID, mountPoint: mountPoint), result.status == 0 {
@@ -70,8 +82,89 @@ final class LiveWritableMountSystem: WritableMountSystem, @unchecked Sendable {
             mountPoint: mountPoint,
             isWritableMount: writable,
             volumeUUID: uuid,
-            volumeName: description[kDADiskDescriptionVolumeNameKey as String] as? String
+            volumeName: description[kDADiskDescriptionVolumeNameKey as String] as? String,
+            mediaUUID: Self.uuid(for: kDADiskDescriptionMediaUUIDKey, in: description),
+            mediaContent: description[kDADiskDescriptionMediaContentKey as String] as? String
         )
+    }
+
+    func mediaTopology(diskBSDName disk: String) async -> HelperMediaTopology? {
+        HelperMediaTopologySettlement.settled {
+            Self.mediaTopologySample(diskBSDName: disk, session: session)
+        }
+    }
+
+    private static func mediaTopologySample(
+        diskBSDName disk: String, session: DASession
+    ) -> HelperMediaTopology? {
+        guard disk.range(of: #"^disk[0-9]+$"#, options: .regularExpression) != nil,
+              let inventory = try? SystemIOMediaEnumerationReader().currentSnapshot(),
+              inventory.bsdNames.contains(disk)
+        else { return nil }
+        let children = inventory.bsdNames.filter { $0.hasPrefix(disk + "s") }.sorted()
+        guard !children.isEmpty else { return nil }
+        var observed: [HelperObservedMedia] = []
+        for bsd in [disk] + children {
+            guard let daDisk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, bsd) else { return nil }
+            let ioMedia = DADiskCopyIOMedia(daDisk)
+            guard ioMedia != 0 else { return nil }
+            defer { IOObjectRelease(ioMedia) }
+            var entryID: UInt64 = 0
+            guard IORegistryEntryGetRegistryEntryID(ioMedia, &entryID) == KERN_SUCCESS,
+                  entryID > 0,
+                  let isWhole = ioBoolean("Whole", on: ioMedia),
+                  isWhole == (bsd == disk)
+            else { return nil }
+            let parentID = bsd == disk ? nil : parentWholeMediaEntryID(of: ioMedia)
+            guard bsd == disk || parentID != nil else { return nil }
+            observed.append(HelperObservedMedia(
+                bsdName: bsd, registryEntryID: entryID,
+                parentRegistryEntryID: parentID, isWholeDisk: isWhole,
+                mediaUUID: ioString("UUID", on: ioMedia),
+                content: ioString("Content", on: ioMedia),
+                contentHint: ioString("Content Hint", on: ioMedia)
+            ))
+        }
+        return HelperMediaTopology(disk: observed[0], partitions: Array(observed.dropFirst()))
+    }
+
+    private static func parentWholeMediaEntryID(of media: io_service_t) -> UInt64? {
+        var current = media
+        for _ in 0..<16 {
+            var parent: io_registry_entry_t = 0
+            guard IORegistryEntryGetParentEntry(current, kIOServicePlane, &parent) == KERN_SUCCESS else {
+                if current != media { IOObjectRelease(current) }
+                return nil
+            }
+            if current != media { IOObjectRelease(current) }
+            if IOObjectConformsTo(parent, "IOMedia") != 0,
+               ioBoolean("Whole", on: parent) == true {
+                var entryID: UInt64 = 0
+                let result = IORegistryEntryGetRegistryEntryID(parent, &entryID)
+                IOObjectRelease(parent)
+                return result == KERN_SUCCESS && entryID > 0 ? entryID : nil
+            }
+            current = parent
+        }
+        if current != media { IOObjectRelease(current) }
+        return nil
+    }
+
+    private static func ioString(_ key: String, on media: io_registry_entry_t) -> String? {
+        IORegistryEntryCreateCFProperty(media, key as NSString, kCFAllocatorDefault, 0)?
+            .takeRetainedValue() as? String
+    }
+
+    private static func ioBoolean(_ key: String, on media: io_registry_entry_t) -> Bool? {
+        IORegistryEntryCreateCFProperty(media, key as NSString, kCFAllocatorDefault, 0)?
+            .takeRetainedValue() as? Bool
+    }
+
+    private static func uuid(for key: CFString, in description: [String: Any]) -> String? {
+        guard let raw = description[key as String] else { return nil }
+        let value = raw as CFTypeRef
+        guard CFGetTypeID(value) == CFUUIDGetTypeID() else { return nil }
+        return CFUUIDCreateString(nil, (raw as! CFUUID)) as String
     }
 
     func readBootSector(partitionBSDName bsd: String) async -> Data? {
@@ -92,33 +185,84 @@ final class LiveWritableMountSystem: WritableMountSystem, @unchecked Sendable {
         return Data(bytes)
     }
 
+    func fsKitRuntimeReady() async -> Bool? {
+        let driver = helpersDirectory.appendingPathComponent("ntfs-3g")
+        let probe = helpersDirectory.appendingPathComponent("ntfs-3g.probe")
+        guard Self.satisfiesPinnedSignature(driver, identifier: Self.driverIdentifier),
+              Self.satisfiesPinnedSignature(probe, identifier: Self.probeIdentifier)
+        else { return false }
+        // FSKit module selection is per user. Ask the same fixed UID that will
+        // own the mount, before removing the native read-only mount.
+        guard let result = await runAsMountUser(
+            .fsKitReady, mountPoint: MountUserAgent.fsKitCheckPlaceholder,
+            timeout: .seconds(5)
+        ) else { return nil }
+        return result.status == 0
+    }
+
     func healthIsClean(bsdName bsd: String) async -> Bool? {
         let probe = helpersDirectory.appendingPathComponent("ntfs-3g.probe")
         guard Self.satisfiesPinnedSignature(probe, identifier: Self.probeIdentifier),
               let pid = Self.spawn(probe.path, ["ntfs-3g.probe", "--readwrite", "/dev/" + bsd], newSession: false)
         else { return nil }
-        // Read-only probe: bounded wait; exit 0 means clean and mountable read-write.
-        for _ in 0..<600 {
-            var status: Int32 = 0
-            let result = waitpid(pid, &status, WNOHANG)
-            if result == pid { return (status & 0x7f) == 0 && ((status >> 8) & 0xff) == 0 }
-            if result < 0 { return nil }
-            try? await Task.sleep(for: .milliseconds(100))
+        // Read-only probe: one deadline owns both the exit and child cleanup.
+        switch await BoundedHelperChildIO.run(
+            pid: pid, outputFD: nil, timeout: .seconds(60), maximumOutputBytes: 0
+        ) {
+        case let .completed(exitStatus, _): return exitStatus == 0
+        case .timedOutReaped, .ioFailedReaped, .terminationUnconfirmed: return nil
         }
-        kill(pid, SIGTERM)
-        return nil
     }
 
     // MARK: Mutations
 
-    func unmountNative(bsdName bsd: String) async -> Bool {
-        guard let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, bsd) else { return false }
+    private func boundDADisk(
+        bsdName bsd: String, expectedRegistryEntryID: UInt64, isWholeDisk: Bool
+    ) -> DADisk? {
+        guard expectedRegistryEntryID > 0,
+              let named = DADiskCreateFromBSDName(kCFAllocatorDefault, session, bsd)
+        else { return nil }
+        let media = DADiskCopyIOMedia(named)
+        guard media != 0 else { return nil }
+        defer { IOObjectRelease(media) }
+        var entryID: UInt64 = 0
+        guard IORegistryEntryGetRegistryEntryID(media, &entryID) == KERN_SUCCESS,
+              entryID == expectedRegistryEntryID,
+              Self.ioBoolean("Whole", on: media) == isWholeDisk,
+              let bound = DADiskCreateFromIOMedia(kCFAllocatorDefault, session, media),
+              let boundName = DADiskGetBSDName(bound).map({ String(cString: $0) }),
+              boundName == bsd,
+              let description = DADiskCopyDescription(bound) as? [String: Any],
+              description[kDADiskDescriptionMediaWholeKey as String] as? Bool == isWholeDisk
+        else { return nil }
+        return bound
+    }
+
+    func unmountNative(bsdName bsd: String, expectedRegistryEntryID: UInt64) async -> Bool {
+        guard let disk = boundDADisk(
+            bsdName: bsd, expectedRegistryEntryID: expectedRegistryEntryID, isWholeDisk: false
+        ) else { return false }
         return await withCheckedContinuation { continuation in
-            let box = Unmanaged.passRetained(ContinuationBox(continuation))
+            guard let token = Self.diskCallbacks.register(continuation, retainedResource: disk) else {
+                continuation.resume(returning: false)
+                return
+            }
+            guard let context = UnsafeMutableRawPointer(bitPattern: token) else {
+                Self.diskCallbacks.complete(token, result: false)
+                return
+            }
             DADiskUnmount(disk, DADiskUnmountOptions(kDADiskUnmountOptionDefault), { _, dissenter, context in
-                let box = Unmanaged<ContinuationBox>.fromOpaque(context!).takeRetainedValue()
-                box.continuation.resume(returning: dissenter == nil)
-            }, box.toOpaque())
+                guard let context else { return }
+                LiveWritableMountSystem.diskCallbacks.complete(UInt(bitPattern: context), result: dissenter == nil)
+            }, context)
+            Self.scheduleDiskCallbackTimeout(token)
+        }
+    }
+
+    private static func scheduleDiskCallbackTimeout(_ token: UInt) {
+        Task.detached(priority: .utility) {
+            try? await Task.sleep(for: diskCallbackTimeout)
+            diskCallbacks.timeout(token)
         }
     }
 
@@ -128,12 +272,18 @@ final class LiveWritableMountSystem: WritableMountSystem, @unchecked Sendable {
         return lstat(path, &info) == 0 || errno != ENOENT
     }
 
-    func startDriver(bsdName bsd: String, mountPoint: String) async -> Int32? {
+    func startDriver(bsdName bsd: String, expectedRegistryEntryID: UInt64, mountPoint: String) async -> Int32? {
         let driver = helpersDirectory.appendingPathComponent("ntfs-3g")
         guard Self.satisfiesPinnedSignature(driver, identifier: Self.driverIdentifier),
-              let pid = Self.spawn(driver.path, ["ntfs-3g", "/dev/" + bsd, mountPoint, "-o", Self.driverOptions],
-                                   newSession: true)
+              let bound = boundDADisk(
+                  bsdName: bsd, expectedRegistryEntryID: expectedRegistryEntryID, isWholeDisk: false
+              )
         else { return nil }
+        let pid = withExtendedLifetime(bound) {
+            Self.spawn(driver.path, ["ntfs-3g", "/dev/" + bsd, mountPoint, "-o", Self.driverOptions],
+                       newSession: true)
+        }
+        guard let pid else { return nil }
         DriverRegistry.shared.adopt(pid: pid, mountPoint: mountPoint)
         return pid
     }
@@ -171,17 +321,26 @@ final class LiveWritableMountSystem: WritableMountSystem, @unchecked Sendable {
     }
 
     func driverHolds(pid: Int32, devicePath: String) async -> Bool {
+        strictDriverHolds(pid: pid, devicePath: devicePath) == true
+    }
+
+    private func strictDriverHolds(pid: Int32, devicePath: String) -> Bool? {
         let bytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
-        guard bytes > 0 else { return false }
-        let count = Int(bytes) / MemoryLayout<proc_fdinfo>.stride
+        guard bytes > 0 else { return nil }
+        let count = Int(bytes) / MemoryLayout<proc_fdinfo>.stride + 64
         var fds = [proc_fdinfo](repeating: proc_fdinfo(), count: count)
-        let filled = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, &fds, bytes)
-        guard filled > 0 else { return false }
+        let capacity = Int32(count * MemoryLayout<proc_fdinfo>.stride)
+        let filled = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, &fds, capacity)
+        guard filled > 0, filled < capacity,
+              Int(filled) % MemoryLayout<proc_fdinfo>.stride == 0
+        else { return nil }
         for fd in fds.prefix(Int(filled) / MemoryLayout<proc_fdinfo>.stride)
         where fd.proc_fdtype == UInt32(PROX_FDTYPE_VNODE) {
             var vnode = vnode_fdinfowithpath()
             let size = Int32(MemoryLayout<vnode_fdinfowithpath>.size)
-            guard proc_pidfdinfo(pid, fd.proc_fd, PROC_PIDFDVNODEPATHINFO, &vnode, size) == size else { continue }
+            guard proc_pidfdinfo(pid, fd.proc_fd, PROC_PIDFDVNODEPATHINFO, &vnode, size) == size else {
+                return nil
+            }
             let path = withUnsafePointer(to: &vnode.pvip.vip_path) {
                 $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) { String(cString: $0) }
             }
@@ -202,46 +361,60 @@ final class LiveWritableMountSystem: WritableMountSystem, @unchecked Sendable {
 
     /// Runs one fixed operation in a child copy of this helper that permanently drops to the
     /// mount user first (FSKit mounts refuse root). Returns the exit status and bounded stdout.
-    func runAsMountUser(_ operation: MountUserOperation, mountPoint: String) async -> (status: Int32, output: String)? {
+    func runAsMountUser(
+        _ operation: MountUserOperation, mountPoint: String,
+        timeout: Duration = .seconds(60)
+    ) async -> (status: Int32, output: String)? {
         guard MountUserAgent.isAcceptedMountPoint(mountPoint) else { return nil }
         var pipeDescriptors: [Int32] = [0, 0]
         guard pipe(&pipeDescriptors) == 0 else { return nil }
-        defer { close(pipeDescriptors[0]) }
         let pid = Self.spawn(executablePath, ["NTFSLiteHelper", MountUserAgent.flag, operation.rawValue, mountPoint],
                              newSession: false, standardOutput: pipeDescriptors[1])
         close(pipeDescriptors[1])
-        guard let pid else { return nil }
-        var output = Data()
-        var buffer = [UInt8](repeating: 0, count: 256)
-        while output.count < 4096 {
-            let count = read(pipeDescriptors[0], &buffer, buffer.count)
-            if count <= 0 { break }
-            output.append(contentsOf: buffer.prefix(count))
+        guard let pid else {
+            close(pipeDescriptors[0])
+            return nil
         }
-        for _ in 0..<600 {
-            var status: Int32 = 0
-            let result = waitpid(pid, &status, WNOHANG)
-            if result == pid {
-                guard (status & 0x7f) == 0 else { return nil }
-                return ((status >> 8) & 0xff, String(decoding: output, as: UTF8.self))
-            }
-            if result < 0 { return nil }
-            try? await Task.sleep(for: .milliseconds(100))
+        switch await BoundedHelperChildIO.run(
+            pid: pid, outputFD: pipeDescriptors[0], timeout: timeout, maximumOutputBytes: 4096
+        ) {
+        case let .completed(exitStatus, output):
+            guard let text = String(data: output, encoding: .utf8) else { return nil }
+            return (exitStatus, text)
+        case .timedOutReaped, .ioFailedReaped, .terminationUnconfirmed:
+            return nil
         }
-        return nil
     }
 
     static func statfsEntry(mountPoint: String) -> statfs? {
-        let count = getfsstat(nil, 0, MNT_NOWAIT)
-        guard count > 0 else { return nil }
-        var entries = [FileSystemStatus](repeating: FileSystemStatus(), count: Int(count))
-        let filled = getfsstat(&entries, Int32(MemoryLayout<statfs>.stride * Int(count)), MNT_NOWAIT)
-        guard filled > 0 else { return nil }
-        let matches = entries.prefix(Int(filled)).filter { entry in
-            var entry = entry
-            return string(&entry.f_mntonname) == mountPoint
+        func sample() -> statfs? {
+            let count = getfsstat(nil, 0, MNT_NOWAIT)
+            guard count > 0 else { return nil }
+            let capacity = Int(count) + 8
+            guard capacity < Int(Int32.max) / MemoryLayout<statfs>.stride else { return nil }
+            var entries = [FileSystemStatus](repeating: FileSystemStatus(), count: capacity)
+            let filled = getfsstat(&entries, Int32(capacity * MemoryLayout<statfs>.stride), MNT_NOWAIT)
+            let after = getfsstat(nil, 0, MNT_NOWAIT)
+            guard HelperMountTableSnapshotPolicy.isComplete(
+                initialCount: Int(count), copiedCount: Int(filled),
+                countAfterRead: Int(after), capacity: capacity
+            ) else { return nil }
+            let matches = entries.prefix(Int(filled)).filter { entry in
+                var entry = entry
+                return string(&entry.f_mntonname) == mountPoint
+            }
+            return matches.count == 1 ? matches[0] : nil
         }
-        return matches.count == 1 ? matches[0] : nil
+        guard var first = sample(), var second = sample(),
+              string(&first.f_mntfromname) == string(&second.f_mntfromname),
+              string(&first.f_mntonname) == string(&second.f_mntonname),
+              string(&first.f_fstypename) == string(&second.f_fstypename),
+              first.f_fsid.val.0 == second.f_fsid.val.0,
+              first.f_fsid.val.1 == second.f_fsid.val.1,
+              first.f_flags == second.f_flags,
+              first.f_flags_ext == second.f_flags_ext
+        else { return nil }
+        return second
     }
 
     static func string<T>(_ tuple: inout T) -> String {
@@ -290,11 +463,6 @@ final class LiveWritableMountSystem: WritableMountSystem, @unchecked Sendable {
     }
 }
 
-private final class ContinuationBox {
-    let continuation: CheckedContinuation<Bool, Never>
-    init(_ continuation: CheckedContinuation<Bool, Never>) { self.continuation = continuation }
-}
-
 /// Reaps drivers started by this helper so they never linger as zombies, and remembers the
 /// mount point each one serves for the standard unmount path.
 final class DriverRegistry: @unchecked Sendable {
@@ -326,19 +494,34 @@ extension LiveWritableMountSystem: DiskReleaseSystem {
 
     func ownedFSKitMounts(devicePath: String) async -> [HelperOwnedMount]? {
         let driverPath = helpersDirectory.appendingPathComponent("ntfs-3g").resolvingSymlinksInPath().path
-        let capacity = proc_listallpids(nil, 0)
-        guard capacity > 0 else { return nil }
-        var pids = [pid_t](repeating: 0, count: Int(capacity) + 64)
-        let count = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.stride))
-        guard count > 0 else { return nil }
+        guard let pids = Self.stableProcessIDs() else { return nil }
         var owned: [HelperOwnedMount] = []
-        for pid in pids.prefix(Int(count)) where pid > 0 {
+        for pid in pids {
             var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
-            guard proc_pidpath(pid, &path, UInt32(path.count)) > 0 else { continue }
+            let pathLength = proc_pidpath(pid, &path, UInt32(path.count))
+            if pathLength <= 0 {
+                let status = kill(pid, 0)
+                let code = errno
+                guard status != 0, HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(errno: code) else {
+                    return nil
+                }
+                continue
+            }
+            guard pathLength < path.count else { return nil }
             let executable = String(decoding: path.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
-            guard (executable as NSString).lastPathComponent == "ntfs-3g",
-                  await driverHolds(pid: pid, devicePath: devicePath)
-            else { continue }
+            guard !executable.isEmpty else { return nil }
+            guard (executable as NSString).lastPathComponent == "ntfs-3g" else { continue }
+            guard let holds = strictDriverHolds(pid: pid, devicePath: devicePath) else { return nil }
+            if !holds {
+                // A pinned driver aimed at this partition may be between
+                // process creation and opening the device. Do not certify
+                // the partition as mount-free in that interval.
+                if executable == driverPath {
+                    guard let arguments = Self.arguments(of: pid), arguments.count == 5 else { return nil }
+                    if arguments[1] == devicePath { return nil }
+                }
+                continue
+            }
             // An NTFS-3G process holding the device that is not our recognizable mount makes the
             // state unknown: never report the partition as released.
             guard executable == driverPath,
@@ -373,50 +556,123 @@ extension LiveWritableMountSystem: DiskReleaseSystem {
         return info.st_mode & S_IFMT == S_IFDIR && rmdir(path) == 0
     }
 
-    func unmountNativeVolume(bsdName: String) async -> Bool {
-        await unmountNative(bsdName: bsdName)
+    func unmountNativeVolume(bsdName: String, expectedRegistryEntryID: UInt64) async -> Bool {
+        await unmountNative(bsdName: bsdName, expectedRegistryEntryID: expectedRegistryEntryID)
     }
 
-    func eject(diskBSDName: String) async -> Bool {
-        guard let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, diskBSDName) else { return false }
+    func eject(diskBSDName: String, expectedRegistryEntryID: UInt64) async -> Bool {
+        guard let disk = boundDADisk(
+            bsdName: diskBSDName, expectedRegistryEntryID: expectedRegistryEntryID, isWholeDisk: true
+        ) else { return false }
         return await withCheckedContinuation { continuation in
-            let box = Unmanaged.passRetained(ContinuationBox(continuation))
+            guard let token = Self.diskCallbacks.register(continuation, retainedResource: disk) else {
+                continuation.resume(returning: false)
+                return
+            }
+            guard let context = UnsafeMutableRawPointer(bitPattern: token) else {
+                Self.diskCallbacks.complete(token, result: false)
+                return
+            }
             DADiskEject(disk, DADiskEjectOptions(kDADiskEjectOptionDefault), { _, dissenter, context in
-                let box = Unmanaged<ContinuationBox>.fromOpaque(context!).takeRetainedValue()
-                box.continuation.resume(returning: dissenter == nil)
-            }, box.toOpaque())
+                guard let context else { return }
+                LiveWritableMountSystem.diskCallbacks.complete(UInt(bitPattern: context), result: dissenter == nil)
+            }, context)
+            Self.scheduleDiskCallbackTimeout(token)
         }
     }
 
     func orphanedMounts(diskBSDName disk: String) async -> [HelperOwnedMount]? {
         guard disk.range(of: #"^disk[0-9]+$"#, options: .regularExpression) != nil else { return nil }
         let driverPath = helpersDirectory.appendingPathComponent("ntfs-3g").resolvingSymlinksInPath().path
-        let capacity = proc_listallpids(nil, 0)
-        guard capacity > 0 else { return nil }
-        var pids = [pid_t](repeating: 0, count: Int(capacity) + 64)
-        let count = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.stride))
-        guard count > 0 else { return nil }
+        guard let pids = Self.stableProcessIDs() else { return nil }
         var orphans: [HelperOwnedMount] = []
-        for pid in pids.prefix(Int(count)) where pid > 0 {
+        for pid in pids {
             var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
-            guard proc_pidpath(pid, &path, UInt32(path.count)) > 0,
-                  String(decoding: path.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self) == driverPath,
-                  let arguments = Self.arguments(of: pid), arguments.count == 5,
-                  arguments[1].range(of: "^/dev/\(disk)s[0-9]+$", options: .regularExpression) != nil,
+            let pathLength = proc_pidpath(pid, &path, UInt32(path.count))
+            if pathLength <= 0 {
+                let status = kill(pid, 0)
+                let code = errno
+                guard status != 0, HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(errno: code) else {
+                    return nil
+                }
+                continue
+            }
+            guard pathLength < path.count else { return nil }
+            let executable = String(decoding: path.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+            guard !executable.isEmpty else { return nil }
+            guard executable == driverPath else { continue }
+            guard let arguments = Self.arguments(of: pid), arguments.count == 5,
+                  arguments[1].range(of: #"^/dev/disk[0-9]+s[0-9]+$"#, options: .regularExpression) != nil,
                   arguments[3] == "-o", arguments[4] == Self.driverOptions
-            else { continue }
+            else { return nil }
+            guard arguments[1].range(of: "^/dev/\(disk)s[0-9]+$", options: .regularExpression) != nil else {
+                continue
+            }
             var info = stat()
             guard lstat(arguments[1], &info) != 0, errno == ENOENT,
                   let entry = await mountEntry(at: arguments[2]), entry.flags.isSuperset(of: ["macfuse", "fskit"])
-            else { continue }
+            else { return nil }
             orphans.append(HelperOwnedMount(mountPoint: arguments[2], driverPID: pid))
         }
         return orphans
     }
 
-    func diskIsPresent(bsdName: String) async -> Bool {
+    func diskIsPresent(bsdName: String, registryEntryID: UInt64) async -> Bool? {
+        guard bsdName.range(of: #"^disk[0-9]+$"#, options: .regularExpression) != nil,
+              registryEntryID > 0
+        else { return nil }
         var info = stat()
-        return lstat("/dev/" + bsdName, &info) == 0
+        if lstat("/dev/" + bsdName, &info) == 0 { return true }
+        guard errno == ENOENT,
+              let inventory = try? SystemIOMediaEnumerationReader().currentSnapshot(),
+              let registryIDs = Self.stableIOMediaEntryIDs()
+        else { return nil }
+        return HelperDiskPresencePolicy.isPresent(
+            deviceNodeExists: false,
+            bsdNameInRegistry: inventory.bsdNames.contains(bsdName),
+            requestedEntryInRegistry: registryIDs.contains(registryEntryID),
+            diskArbitrationHasDisk: DADiskCreateFromBSDName(kCFAllocatorDefault, session, bsdName) != nil
+        )
+    }
+
+    private static func stableIOMediaEntryIDs() -> Set<UInt64>? {
+        guard let first = ioMediaEntryIDs(), let second = ioMediaEntryIDs(), first == second else { return nil }
+        return first
+    }
+
+    private static func ioMediaEntryIDs() -> Set<UInt64>? {
+        guard let matching = IOServiceMatching("IOMedia") else { return nil }
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) == KERN_SUCCESS else {
+            return nil
+        }
+        defer { IOObjectRelease(iterator) }
+        var entryIDs: Set<UInt64> = []
+        while true {
+            let media = IOIteratorNext(iterator)
+            guard media != 0 else { break }
+            defer { IOObjectRelease(media) }
+            var entryID: UInt64 = 0
+            guard IORegistryEntryGetRegistryEntryID(media, &entryID) == KERN_SUCCESS,
+                  entryID > 0, entryIDs.insert(entryID).inserted
+            else { return nil }
+        }
+        guard IOIteratorIsValid(iterator) != 0, !entryIDs.isEmpty else { return nil }
+        return entryIDs
+    }
+
+    private static func stableProcessIDs() -> [pid_t]? {
+        HelperProcessInventorySettlement.settled {
+            let estimate = proc_listallpids(nil, 0)
+            guard estimate > 0, estimate < 1_000_000 else { return nil }
+            let capacity = Int(estimate) + 64
+            var pids = [pid_t](repeating: 0, count: capacity)
+            let returned = proc_listallpids(&pids, Int32(capacity * MemoryLayout<pid_t>.stride))
+            guard returned > 0 else { return nil }
+            return HelperProcessInventorySample(
+                reportedCount: Int(returned), capacity: capacity, processIDs: pids
+            )
+        }
     }
 
     /// argv of a process via KERN_PROCARGS2 (argc followed by exec path and arguments).

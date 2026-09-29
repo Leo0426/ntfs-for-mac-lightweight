@@ -13,8 +13,40 @@ struct NTFSLiteReadOnlyApp: App {
 
     var body: some Scene {
         Settings {
-            EmptyView()
+            AppInformationSettings()
         }
+    }
+}
+
+private struct AppInformationSettings: View {
+    private var versionText: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        return "版本 \(version ?? "未知")（\(build ?? "未知")）"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("NTFS 轻量助手", systemImage: "externaldrive.fill")
+                .font(.title2.weight(.semibold))
+            Text(versionText)
+                .foregroundStyle(.secondary)
+            Divider()
+            Text("使用方式")
+                .font(.headline)
+            Text("连接外置 NTFS 磁盘，在主窗口选择卷。启用写入前确认它是普通数据卷；结束文件操作后安全推出整块磁盘。")
+                .fixedSize(horizontal: false, vertical: true)
+            Text("运行环境检查和脱敏诊断位于主窗口。此版本没有需要配置的应用偏好。")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Divider()
+            Text("写入能力来自有限的实物验证；Windows 端复核和长期兼容性验证尚未完成。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(24)
+        .frame(width: 420)
     }
 }
 
@@ -23,7 +55,16 @@ final class ReadOnlyAppStore: ObservableObject {
     @Published private(set) var dashboard: ReadOnlyDashboardPresentation
     @Published private(set) var selectionResetEpoch: ReadOnlySelectionResetEpoch
     @Published private(set) var diagnosticsText = "尚无诊断记录。"
-    private(set) lazy var writeController = WriteController { [weak self] in self?.refresh() }
+    private(set) lazy var writeController = WriteController(
+        refreshObservation: { [weak self] in self?.refresh() },
+        canRequestWriting: { [weak self] id in
+            self?.dashboard.volumes.first(where: { $0.id == id })?.actions.canEnableWriting == true
+        },
+        canRequestEject: { [weak self] id in
+            self?.dashboard.physicalDisks.first(where: { $0.id == id })?
+                .volumes.contains(where: { $0.actions.canSafeEject }) == true
+        }
+    )
 
     private let diskObserver: ReadOnlyDiskObserver
     private let setupLoader: SystemSetupFactsLoader
@@ -77,6 +118,7 @@ final class ReadOnlyAppStore: ObservableObject {
     }
 
     func refresh() {
+        writeController.refreshHelperState()
         let revision = observationSession.beginRefresh()
         selectionResetEpoch = observationSession.selectionResetEpoch
         observationTask?.cancel()
@@ -174,6 +216,7 @@ final class ReadOnlyAppStore: ObservableObject {
             isSetupRefreshing: isSetupRefreshing,
             setupReport: setupReport
         )
+        writeController.reconcile(observation: observationSession.observation)
     }
 
     private func recordSetupDiagnostics(report: SystemSetupReport) async {
@@ -353,14 +396,27 @@ final class ReadOnlyAppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        store.writeController.refreshHelperState()
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
 
     private func installStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = "NTFS"
-        item.button?.toolTip = "NTFS 轻量助手（只读观察）"
+        if let image = NSImage(
+            systemSymbolName: "externaldrive.fill",
+            accessibilityDescription: "NTFS 轻量助手"
+        ) {
+            image.isTemplate = true
+            item.button?.image = image
+            item.button?.imagePosition = .imageOnly
+        } else {
+            item.button?.title = "NTFS"
+        }
+        item.button?.toolTip = "NTFS 轻量助手"
 
         let menu = NSMenu()
         let summaryItem = NSMenuItem(

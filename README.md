@@ -7,21 +7,22 @@
 
 ## 当前状态
 
-目前已完成产品调研、安全状态机、独立 IOKit 精确枚举、稳定 mount table 采样、受保护卷
-失败关闭角色模型，以及可运行的本地 C 版只读应用。用途仍为 unknown 的外置 NTFS 会在其余
-事实完整时显示为“用途未确认”的 `ReadOnlyVolumeCandidate`，但不会被推断为可信 data、进入
-变更 inventory 或获得写入/推出资格。独立 Gate 1 证据 recorder 与本地 capture/verify 工具已经
-实现，但尚未在专用外置盘取得并人工签署实物证据；工具最多报告 `readyForHumanReview`，不能
-报告 Gate pass。项目不会实际修改、挂载、卸载或推出磁盘。
+正式 SwiftUI 应用已接入外置 NTFS 数据卷的手动启用写入与安全推出：用户确认卷用途后，App
+通过一次性结构化请求调用特权 helper；helper 在操作前重新核对系统事实并执行固定的可写挂载
+或标准整盘卸载与推出。当前仅开放 GPT Microsoft Basic Data NTFS 目标，以及同盘可选的未挂载
+EFI 分区。独立 Gate 1 证据工具仍未取得人工签署的实物证据，不能报告 Gate pass；Gate 1–5
+状态不因正式 App 接入写入而改变。现有可牺牲 U 盘写入闭环属于有限验证；新增 GPT/EFI 路径的
+快速拔插、真正整盘推出和 Windows 复核仍未完成，不能视为已验证消费级安全性。当前本地构建
+产物仅供检查；受保护安装路径的完整验证尚未完成。
 
 Gate 的编号、定义、前置关系和当前状态只以[分阶段实施计划](docs/engineering/implementation-plan.md)为准；README、PRD 和调研文档不单独宣布 Gate 通过。
 
-- 仓库由 Codex 主导开发，根目录 `AGENTS.md` 固化了测试驱动、失败关闭和硬件 Gate 前禁止真实磁盘变更的工作约定。
+- 仓库由 Codex 主导开发，根目录 `AGENTS.md` 固化了测试驱动、失败关闭与仅在一次性镜像或已授权可牺牲 U 盘上验证真实磁盘操作的工作约定。
 - UI 已确定采用 C 版方向：菜单栏保留常驻入口，主界面使用“左侧磁盘列表 + 右侧状态详情”的单窗口结构；A/B 仅作为一次性设计比较记录，不进入正式实现。
 - 已有一个只使用内存 fixture 的 C 版 SwiftUI 场景原型；它不会读取磁盘、打开访达、启动进程或执行任何真实动作。
-- 已有一个本地 C 版只读应用：通过 Disk Arbitration 与 mount table 展示可信 snapshot 和无变更
-  资格的 unknown-role candidate，按物理盘分组，提供文字菜单栏入口、手动刷新、可执行的 Setup
-  下一步和脱敏诊断；它不包含写入、挂载、卸载或推出按钮。
+- 正式 App 通过 Disk Arbitration、IOKit 与 mount table 展示磁盘状态，按物理盘分组，提供菜单栏
+  入口、手动刷新、设置引导与脱敏诊断；符合当前范围的目标可显式确认用途并请求启用写入，
+  本次会话中已启用写入的磁盘可从概览请求安全推出。App 重启后不会自动恢复此前的推出会话。
 - C 版自动验收已固定全部 24 个领域状态的动作/禁用矩阵、长卷名和多分区排序；新观察订阅
   会轮换 selection-reset epoch 并回到概览，即使新 inventory 复用相同完整实例 ID，而同一 epoch
   的临时 scanning 保留选择且详情只从当前 dashboard 解析。多卷物理盘的每个 sibling 使用确定、
@@ -39,8 +40,9 @@ Gate 的编号、定义、前置关系和当前状态只以[分阶段实施计�
 - Setup 探针只允许固定语义的只读命令，并严格解析 PluginKit、System Extension 与已加载 kext
   输出；授权、依赖、输出或 Gate 2 具名有限候选范围的冲突目录不完整时保持未就绪。
 - 诊断只保存固定状态码、数量、版本、布尔事实、数值退出状态和运行期数字别名；不会保存卷标、用户名、任何路径、磁盘或卷 UUID、BSD 名，也不接收或记录任何标准错误文本。快照以原子替换、`0600` 权限、schema/字节/时间上限、canonical JSON、文件稳定性和 target 语义检查保存在用户 Application Support；清除操作只有在本地存档确实移除后才报告成功，损坏、过期、未来时间、符号链接或权限异常的旧存档全部忽略。
-- helper 协议已有唯一的进程期原子准入入口：先限制 4 KiB 原始消息，再严格拒绝未知/重复字段，核对 schema、完整实例身份和固定动作，最后原子消费 operation ID；解码与重放集合已经收回模块私有，只有该入口能产生不可由调用方伪造的准入值。它仍不包含 IPC/XPC、提权、安装、命令执行器或真实磁盘变更。
-- 正式只读应用的 package 依赖图不包含 `NTFSLiteMutationPreparation` 或 `NTFSLiteHelperProtocol`；唯一的进程运行器位于非产品 `NTFSLiteReadOnlyProbing` target，只能执行固定语义的只读 Setup 探针。输出上限、超时、取消、继承管道和终止未确认均在固定墙钟上界内失败关闭，不把“已截断”误报为可信输出。
+- 正式 App 通过 `SMAppService` 注册的 launchd daemon helper 和 XPC 执行四种固定语义动作；请求协议限制消息大小、核对完整磁盘实例与精确 GPT 分区集合，并一次性消费 operation ID。App 不拼接命令或挂载参数，特权执行集中在 helper。
+- 新版 helper 的签名标识、Mach service 与 daemon plist 统一使用 `com.leolu.ntfslite.helper.v2`；旧版服务不会被构建脚本移除，但新版 App 不连接旧服务。
+- App 进程仅为 Setup 运行固定语义的只读探针；写入会话负责一次请求、超时后不重试和操作后重新观察。独立的 Gate 取证工具仍不得依赖 mutation/helper 模块。
 - Gate 1 取证位于独立的 `NTFSLiteGateEvidence` 与 `NTFSLiteGate1EvidenceTool`：原始磁盘身份只在
   会话内存中用于关联，schema 2 artifact 只含匿名别名、固定枚举、计数、时间、版本、摘要与
   封闭检查点；Evidence-ID 固定为 `G1-` 加 32 位大写十六进制无语义值。观察/检查点/拓扑/编码
@@ -51,40 +53,36 @@ Gate 的编号、定义、前置关系和当前状态只以[分阶段实施计�
 - Gate artifact 使用 sorted-key canonical JSON 与 SHA-256；共享的 `NTFSLiteStrictJSON` 会先拒绝
   重复键，再核对 schema、canonical bytes、派生字段和事件重放。review-ready 还要求 canonical
   observations 最后一帧 coverage verified；即使无 failure code，最后一帧 unverified 也只能
-  incomplete，verifier 会独立重算。正式只读 App 不依赖 recorder 或 CLI，包边界检查把三者
-  分别作为只读 root，并禁止证据工具链到达 mutation/helper。
+  incomplete，verifier 会独立重算。正式 App 不依赖 recorder 或 CLI；包边界检查保持取证工具链
+  与 mutation/helper 隔离，并检查正式 App 的允许依赖集合。
 - Gate capture 的显式 seal 不取消观察任务：它先排空 Disk Arbitration 串行队列，再在
   `drainBoundary` 后完成最终 settle 与独立 IOKit enumeration，最终 observation 与 capture
   terminal 按 FIFO 处理后才封存。自然 source end 或未验证的最终 observation 永久失败关闭。
 - 正式应用直接消费 Setup typed report，能在 UI 中区分“尚未配置可信策略”和“已配置但文件身份、bundle 元数据、精确版本、代码签名或批准摘要核对失败”，并显示不含路径的固定失败码；两者都会安全映射为未就绪。后端不再由 mapper 默认成 FSKit，授权状态仍由可注入 provider 提供且当前正式应用保持 unknown。
-- NTFS-3G 可信制品读取器从同一个已打开文件描述符核对文件类型、owner、权限、大小和 SHA-256，并只通过预先固定的“哈希 → 版本”目录报告版本；没有完整目录或任一核对失败时保持未知，且不会为读取版本而执行该程序。安全挂载编译器只接受不可伪造的可信制品能力并在编译时重验；在未来执行器能用 FD-bound 或等价的失败关闭方式消除最后的路径 TOCTOU 前，不接入真实执行。
+- NTFS-3G 可信制品读取器从同一个已打开文件描述符核对文件类型、owner、权限、大小和 SHA-256，并只通过预先固定的“哈希 → 版本”目录报告版本；没有完整目录或任一核对失败时保持未知，且不会为读取版本而执行该程序。正式 App 的固定驱动在构建时按摘要核对并签名；helper 在执行前后复核身份，但驱动最终打开 BSD 设备路径的快速拔插竞态尚未严格消除。
 - 核心状态机不执行 shell 命令，也不访问真实磁盘。
 - 已挂载外置 NTFS 在 Disk Arbitration 未提供卷 UUID 时，可通过 FD 绑定的原生文件系统 UUID
   补充只读候选身份；两次 UUID 与前后挂载对象均须一致，读取失败或来源冲突仍失败关闭，
   原始 DA 字段不改写。2026-09-08 的 USB 实测已显示一个只读、用途未确认的候选；尚无物理
   重插周期或未挂载身份验证。身份仍缺失/无效时，概览明确解释原因且不生成选择项。
-- 所有变更操作都由协调器生成一次性语义效果；受限适配层只能通过协调器的执行边界调用一次。
-  兼容 closure 必须显式返回 `MountEngineTermination`，未确认终止不能被闭包返回误当成进程已静止。
-- `MountEngineAdapter` 的纯逻辑骨架已就位：把已领取命令路由为具名动作，并只从 positive reap
-  或已触发的 Disk Arbitration 回调断言静止；deadline、取消、已发信号都不推断进程已停止。真实
-  启动/等待由注入的 `Executor` 提供，本仓库不含任何 `Process` 或 Disk Arbitration executor，
-  `executionUnavailable` 对每个命令都失败关闭。
+- Core 协调器及 `MountEngineAdapter` 保留为纯逻辑契约；正式 App 按 ADR 0011 使用
+  `NTFSLiteWriteSession` 调用 helper 的原子 `mountReadWrite`，安全推出依次请求标准整盘卸载与推出。
+  helper 每次操作重新核对目标，超时、断线或无效响应按结果未知处理，不自动重发。
 - 介质代次只由真实 `ReadOnlyDiskInventory` 维护；未接生产路径的平行 `MediaGenerationTracker`
   API 已删除，避免出现两个 source of truth。
-- 每个效果绑定完整磁盘实例；执行前必须重新读取并核对目标、完整卷安全事实、整盘范围和当前设置条件。
-- 用户动作也必须携带完整 `VolumeInstanceID`；等待设置检查期间若磁盘重插，旧点击不会重新绑定到新介质。未来写入还必须有当前连接的一次性 Data Volume Declaration，并与 fresh 候选和精确 sibling 拓扑重新核对；声明不能缓存、跨重插复用或伪装成系统角色证据。
-- 可写挂载前再次要求卷仍为未挂载、clean、经当前请求批准的外置 data NTFS；真正推出前再次
-  要求同盘所有分区仍为未挂载。unknown-role candidate 自身始终没有任何 mutation 动作；
-  一次性声明与 fresh 事实只能进入本次写入资格核对，整盘推出仍需独立的可信 snapshot 与正式规则。
+- 每个变更请求绑定完整磁盘实例；helper 执行前重新读取并核对目标、完整卷安全事实和整盘范围。
+- 用户动作携带完整 `VolumeInstanceID`；磁盘重插后旧点击不会重新绑定到新介质。当前写入要求用户在本次连接中明确确认数据卷用途，并与 fresh 候选和精确 sibling 拓扑重新核对；确认不能缓存、跨重插复用或伪装成系统角色证据。
+- 可写挂载前要求卷仍为 clean、经当前请求批准的外置 data NTFS；helper 可先卸载其原生只读挂载。
+  整盘推出前要求同盘分区满足当前安全条件。用途未知的候选必须由用户本次确认且通过 fresh 核对才可请求写入；
+  安全推出由 helper 独立重新核对整盘身份与分区集合。
 - 命令成功不等于最终成功；写入与推出都需要新的系统观察结果复核。
 - 休眠、dirty、健康未知、内部或其他 `protected` 卷默认拒绝写入。
 - 内部、`protected` 或含受保护分区的物理盘不会提供整盘推出；生产观察不按卷名声称精确识别
   Boot Camp。
-- 已开始的卸载、挂载或推出若超时、取消或期间介质被拔出，会继续锁定整块物理盘，直到进程确认退出；整盘卸载或推出即使明确失败，也必须取得当前 operation 的完整整盘观测再释放，观察不完整则继续锁定。
-- 完整且无重复的整盘事实会原子更新所有 sibling；观测中消失的发起卷终结为“磁盘已断开”。同一代介质一旦收到移除事件，移除 tombstone 单调不回退；同 operation 的迟到 `present` 也只能触发重新读取，不能复活状态或释放租约。
-- 同盘 sibling 在操作期间只显示“请勿读写或断开磁盘”且不提供动作；确认整盘消失后，只有发起卷显示“已验证可以拔出”，其他 sibling 立即撤销为“磁盘已断开”。
+- helper 在同一进程的所有 XPC 连接间共享整盘执行租约；App 对超时、断线或无效响应保持结果未确认，
+  暂停本次会话中该盘的其他操作，不自动重发。操作结束后重新观察系统状态；不能仅凭请求返回就提示可拔出。
 - 公开接口没有强制卸载、`remove_hiberfile`、自动恢复或内核扩展回退。
-- 健康探针解析器只接受单行版本化协议；安全挂载编译器只能生成固定的 `rw,no_def_opts,backend=fskit,norecover` 调用，二者都不具备执行能力。
+- 健康探针解析器只接受单行版本化协议；helper 的可写挂载只使用固定的 FSKit 参数，详见 ADR 0010。
 - 只读订阅使用随机 refresh token 隔离连续刷新；旧任务迟到、取消或旧事件源结束不能覆盖当前状态，当前事件源结束会明确降级为“事件源不可用”。手动、通知与系统唤醒触发的新订阅都会轮换 selection-reset epoch 并回到概览，不继续使用睡眠前或旧订阅的选择与事实。
 - 无 BSD 身份事件、缺父盘子卷、非法 UUID/BSD 名和零介质代次会留下固定问题码，不能被静默变成完整空库存或可信快照。Disk Arbitration 的短暂静默只表示界面收敛，继续标记为枚举覆盖未验证，不能授权变更。
 - Disk Arbitration 明确标记 `VolumeNetwork=true` 的网络卷不进入物理盘 inventory；该标记只接受
@@ -104,26 +102,35 @@ Gate 的编号、定义、前置关系和当前状态只以[分阶段实施计�
 
 - macOS 15.4 或更高版本
 - Apple Silicon first
-- 经 Gate 2 固定并核对精确版本、源码与产物摘要的 NTFS-3G；2026.7.7 当前仅为未批准候选
-- macFUSE FSKit 候选固定版本：5.3.3 是当前唯一稳定版，但带 FSKit 数据面回归
-  #1181 / #1187 / #1188，不是生产批准版本；5.4.0（2026-09-07）已在 release note 确认
-  包含这三项修复，但仍为 pre-release，尚未作为候选批准
+- 固定摘要的 NTFS-3G 2026.7.7 本机制品；有限实物验证不等于 Gate 2 或分发批准
+- macFUSE 5.4.0 FSKit local 是 ADR 0010 中已验证的本机组合，尚未形成跨版本验证矩阵
 - macFUSE FSKit backend
 
-Swift Package 的部署下限已设为 macOS 15.4。当前只读 Setup adapter 已能读取系统版本、架构、
-严格解析的扩展与冲突证据；未经可信文件及静态代码身份核对的依赖版本、helper 授权和不完整的
-Gate 2 候选范围冲突目录仍保持未知。未来每次写入请求与变更前仍必须重新运行 `SetupChecker`。
+Swift Package 的部署下限已设为 macOS 15.4。Setup 只读检查展示系统、依赖与冲突状态；独立
+可信报告未配置时不会据此判定依赖缺失或永久关闭写入。PlugInKit 没有显式 `use` 标记也不能
+证明 FSKit 不可用，因此 App 不以该只读结果隐藏已满足磁盘安全条件的写入入口。helper 的
+安装与系统批准状态独立展示；helper 在卸载原生只读卷之前重新核对目标事实和 FSKit 正信号，
+未确认时拒绝本次操作并保持原生挂载。当前签名调用方可能看不到已可用的跨 Team macFUSE 模块，
+所以这项保守门禁仍需在受保护部署下验证；详见
+[FSKit 运行时写入前检查](docs/research/fskit-runtime-preflight.md)。
 
-## 本地查看 C 版
+## 本地构建与界面检查
 
-构建并打开正式只读壳：
+构建并打开包含 helper 文件的本机签名检查件：
 
 ```bash
-scripts/build-local-read-only-app.sh
-open .build/NTFSLiteReadOnlyApp.app
+scripts/build-local-app.sh
+open .build/NTFSLite.app
 ```
 
-这个应用会读取本机只读系统事实，但不会提供任何磁盘变更操作。
+构建脚本需要本机 Apple Development 签名身份，以及 `.build/dependency-candidates/` 中与脚本摘要
+一致的两个固定 NTFS-3G 制品。`.build/NTFSLite.app` 位于用户可写目录，只用于构建、签名与界面
+检查；不能从此路径启用特权 helper 或执行真实挂载、卸载、推出。启用 helper 前还需把 App 安装
+到 root 所有、非 root 用户不可写的受保护位置，并完成安装路径和签名验证；当前本地构建命令
+不完成这些步骤，也不代表可在实盘上使用。写入路径另需已配置的 macFUSE FSKit。
+
+`scripts/build-local-read-only-app.sh` 仅构建不包含 helper 的只读打包检查件，输出为
+`.build/NTFSLiteReadOnlyApp.app`，不是上述正式 App。
 
 查看覆盖全部状态的内存场景原型：
 
@@ -163,8 +170,9 @@ scripts/check.sh
 ```
 
 需要 Apple Silicon Mac、macOS 15.4+、支持 Swift 6 的命令行工具链及 Python 3。该入口会执行
-全量 warnings-as-errors Release 构建、行为检查、CLI 输入回归、只读包/源码边界、本地 App
-构建与签名验证，以及篡改包负向回归。任一步失败立即退出；不会安装 App 或改变磁盘。
+全量 warnings-as-errors Release 构建、行为检查、CLI 输入回归、只读包/源码边界、无 helper
+检查件构建与签名验证，以及篡改包负向回归。正式签名 App 需另行运行
+`scripts/build-local-app.sh`。任一步失败立即退出；这些构建与检查不会安装 helper 或改变磁盘。
 排查单项失败时，可单独运行 `swift run -c release -Xswiftc -warnings-as-errors NTFSLiteCoreChecks`
 或 `scripts/` 下对应检查脚本。`.build/` 和根目录临时 Swift 编译产物不进入 Git；
 `.scratch/ntfs-mvp/` 中的工单和脱敏证据属于版本化项目记录。
@@ -177,10 +185,12 @@ scripts/check.sh
 | --- | --- |
 | `Sources/NTFSLiteCore` | 领域状态、设置门禁、声明与协调器纯契约 |
 | `Sources/NTFSLiteSystem`、`NTFSLiteReadOnlyProbing` | 只读系统证据与固定 Setup 探针 |
-| `Sources/NTFSLitePresentation`、`NTFSLiteReadOnlyApp` | 展示映射与正式只读 SwiftUI 应用 |
+| `Sources/NTFSLitePresentation`、`NTFSLiteReadOnlyApp` | 展示映射与正式 SwiftUI 应用（target 名保留 ReadOnlyApp） |
 | `Sources/NTFSLiteDiagnostics` | 脱敏诊断与私有本地存档 |
 | `Sources/NTFSLiteGateEvidence`、`NTFSLiteGate1EvidenceTool` | 独立匿名取证、封存与核验 |
-| `Sources/NTFSLiteHelperProtocol`、`NTFSLiteMutationPreparation` | 尚未接入系统执行的协议和纯逻辑 |
+| `Sources/NTFSLiteWriteSession` | 正式 App 的一次性写入与推出会话 |
+| `Sources/NTFSLiteHelperProtocol`、`NTFSLiteHelperExecution`、`NTFSLiteHelper` | XPC 协议、特权执行与 launchd helper |
+| `Sources/NTFSLiteMutationPreparation` | 保留的请求、安全挂载编译与适配纯逻辑 |
 | `Sources/NTFSLiteCoreChecks`、`scripts/` | 行为回归、边界与本地发布检查 |
 
 ## 文档
@@ -193,7 +203,7 @@ scripts/check.sh
 - [ADR 索引](docs/adr/README.md)
 - [Gate 验证运行手册](docs/operations/gate-validation-runbook.md)
 - [依赖供应链记录](docs/operations/dependency-supply-chain.md)
-- [本地只读发布与回滚](docs/release/local-read-only-release.md)
+- [旧只读检查件的本地构建与回滚](docs/release/local-read-only-release.md)
 - [交付地图与本地 Issues](.scratch/ntfs-mvp/MAP.md)
 
 ## 安全边界
@@ -207,4 +217,6 @@ scripts/check.sh
 - 自动可写挂载。
 - kext、降低启动安全性、关闭 SIP 或替换系统文件。
 
-真实磁盘适配层完成后，也只应先在磁盘镜像和可牺牲外置盘上验证。不要用唯一副本测试。
+正式 App 的代码已接入真实挂载与推出；当前 `.build` 检查件不得执行。完成受保护安装验证后，
+开发和验证中的磁盘操作仍只允许在一次性镜像或已授权的可牺牲 U 盘上执行，并在每次操作前
+核对当前目标和失败关闭条件。不要用用户数据盘或唯一副本测试。

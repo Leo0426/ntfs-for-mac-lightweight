@@ -116,6 +116,16 @@ public enum SystemMountTableReadError: Error, Equatable, Sendable {
     case changedDuringRead
 }
 
+package enum SystemMountTableSnapshotPolicy {
+    package static func isComplete(
+        initialCount: Int, copiedCount: Int, countAfterRead: Int, capacity: Int
+    ) -> Bool {
+        initialCount >= 0 && copiedCount >= 0 && countAfterRead >= 0 && capacity > 0
+            && initialCount < capacity && copiedCount < capacity && countAfterRead < capacity
+            && initialCount == copiedCount && copiedCount == countAfterRead
+    }
+}
+
 public struct SystemMountTableReader: Sendable {
     private let maximumSamples: Int
     private let loadSnapshot: @Sendable () throws -> SystemMountTableSnapshot
@@ -174,9 +184,10 @@ public struct SystemMountTableReader: Sendable {
         guard countAfterRead >= 0 else {
             throw SystemMountTableReadError.countFailed(errno)
         }
-        guard Int(copiedCount) < capacity,
-              Int(countAfterRead) < capacity,
-              copiedCount == countAfterRead
+        guard SystemMountTableSnapshotPolicy.isComplete(
+            initialCount: Int(requestedCount), copiedCount: Int(copiedCount),
+            countAfterRead: Int(countAfterRead), capacity: capacity
+        )
         else {
             throw SystemMountTableReadError.changedDuringRead
         }

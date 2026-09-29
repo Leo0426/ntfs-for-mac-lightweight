@@ -1,6 +1,7 @@
 import CoreFoundation
 import DiskArbitration
 import Foundation
+import IOKit
 import NTFSLiteCore
 
 public struct DiskArbitrationDescription: Equatable, Sendable {
@@ -12,6 +13,9 @@ public struct DiskArbitrationDescription: Equatable, Sendable {
     public let isRemovable: Bool?
     public let mediaSize: UInt64?
     public let mediaUUID: String?
+    public let mediaContent: String?
+    public let mediaContentHint: String?
+    public let mediaRegistryID: UInt64?
     public let volumeUUID: String?
     public let volumeName: String?
     public let fileSystemName: String?
@@ -32,6 +36,9 @@ public struct DiskArbitrationDescription: Equatable, Sendable {
         volumeName: String?,
         fileSystemName: String?,
         mountPoint: String?,
+        mediaContent: String? = nil,
+        mediaContentHint: String? = nil,
+        mediaRegistryID: UInt64? = nil,
         roleEvidence: VolumeRoleEvidence? = nil,
         isNetworkVolume: Bool? = nil
     ) {
@@ -43,6 +50,9 @@ public struct DiskArbitrationDescription: Equatable, Sendable {
         self.isRemovable = isRemovable
         self.mediaSize = mediaSize
         self.mediaUUID = mediaUUID
+        self.mediaContent = mediaContent
+        self.mediaContentHint = mediaContentHint
+        self.mediaRegistryID = mediaRegistryID
         self.volumeUUID = volumeUUID
         self.volumeName = volumeName
         self.fileSystemName = fileSystemName
@@ -66,7 +76,11 @@ public struct DiskArbitrationDescription: Equatable, Sendable {
             fileSystemName: fileSystemName,
             isInternal: isInternal,
             roleEvidence: roleEvidence,
-            diskArbitrationMountPoint: mountPoint
+            diskArbitrationMountPoint: mountPoint,
+            mediaUUID: mediaUUID,
+            mediaContent: mediaContent,
+            mediaContentHint: mediaContentHint,
+            mediaRegistryID: mediaRegistryID
         )
     }
 }
@@ -295,6 +309,27 @@ private final class DiskArbitrationStreamController: @unchecked Sendable {
     private static func copyDescription(of disk: DADisk) -> DiskArbitrationDescription {
         let dictionary = DADiskCopyDescription(disk) as? [String: Any] ?? [:]
         let bsdName = DADiskGetBSDName(disk).map(String.init(cString:))
+        let ioMedia = DADiskCopyIOMedia(disk)
+        let mediaContentHint: String?
+        let mediaRegistryID: UInt64?
+        if ioMedia != 0 {
+            defer { IOObjectRelease(ioMedia) }
+            // IOMedia.h: Content Hint is fixed for this media object's lifetime;
+            // Content may be replaced after a client probes the media.
+            let hint = IORegistryEntryCreateCFProperty(
+                ioMedia,
+                "Content Hint" as NSString as CFString,
+                kCFAllocatorDefault,
+                0
+            )?.takeRetainedValue()
+            mediaContentHint = hint as? String
+            var entryID: UInt64 = 0
+            mediaRegistryID = IORegistryEntryGetRegistryEntryID(ioMedia, &entryID) == KERN_SUCCESS
+                && entryID != 0 ? entryID : nil
+        } else {
+            mediaContentHint = nil
+            mediaRegistryID = nil
+        }
 
         let physicalDiskBSDName: String?
         if let wholeDisk = DADiskCopyWholeDisk(disk),
@@ -324,6 +359,9 @@ private final class DiskArbitrationStreamController: @unchecked Sendable {
             volumeName: string(for: kDADiskDescriptionVolumeNameKey, in: dictionary),
             fileSystemName: string(for: kDADiskDescriptionVolumeKindKey, in: dictionary),
             mountPoint: volumePath,
+            mediaContent: string(for: kDADiskDescriptionMediaContentKey, in: dictionary),
+            mediaContentHint: mediaContentHint,
+            mediaRegistryID: mediaRegistryID,
             isNetworkVolume: bool(
                 for: kDADiskDescriptionVolumeNetworkKey,
                 in: dictionary

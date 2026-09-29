@@ -118,7 +118,7 @@ let package = Package(
         // ADR 0011: app-side write session over an injected helper transport; no mutation APIs.
         .target(
             name: "NTFSLiteWriteSession",
-            dependencies: ["NTFSLiteCore", "NTFSLiteHelperExecution", "NTFSLiteHelperProtocol"]
+            dependencies: ["NTFSLiteCore", "NTFSLiteHelperExecution", "NTFSLiteHelperProtocol", "NTFSLiteSystem"]
         ),
         // Pure helper execution decisions over injected system operations; no mutation APIs.
         .target(

@@ -1,3 +1,4 @@
+import Foundation
 import NTFSLiteCore
 
 public struct MountTableSnapshotProvider: Sendable {
@@ -67,6 +68,108 @@ public struct ReadOnlyPhysicalDiskRecord: Equatable, Sendable {
             removability: isRemovable ? .removable : .notRemovable
         )
         return snapshot.isComplete ? snapshot : nil
+    }
+}
+
+public extension ReadOnlyVolumeRecord {
+    /// Binding facts for the helper's current Microsoft Basic Data NTFS path.
+    /// This is a topology check, not a health or mutation authorization.
+    func isBoundMicrosoftBasicDataNTFS(
+        on disk: ReadOnlyPhysicalDiskRecord
+    ) -> Bool {
+        let diskBSDName = disk.instanceID.physicalDiskID.rawValue
+        let volumeInstanceID = snapshot?.instanceID ?? candidate?.instanceID
+        guard disk.issues.isEmpty,
+              disk.instanceID.mediaGeneration.rawValue != 0,
+              disk.description.isWholeDisk == true,
+              disk.description.bsdName == diskBSDName,
+              disk.description.physicalDiskBSDName == diskBSDName,
+              disk.description.isInternal == false,
+              disk.description.mediaContent == "GUID_partition_scheme",
+              let wholeRegistryID = disk.description.mediaRegistryID,
+              wholeRegistryID != 0,
+              disk.volumes.contains(self),
+              volumeInstanceID?.diskInstanceID == disk.instanceID,
+              evidence.bsdName == volumeInstanceID?.volumeID.bsdName,
+              evidence.physicalDiskBSDName == diskBSDName,
+              evidence.isInternal == false,
+              evidence.fileSystemName?.lowercased() == "ntfs",
+              let partitionRegistryID = evidence.mediaRegistryID,
+              partitionRegistryID != 0,
+              let mediaUUID = evidence.mediaUUID,
+              mediaUUID.utf8.count == 36,
+              let parsedMediaUUID = UUID(uuidString: mediaUUID),
+              parsedMediaUUID.uuidString != "00000000-0000-0000-0000-000000000000",
+              let contentHint = evidence.mediaContentHint,
+              contentHint.utf8.count == 36,
+              UUID(uuidString: contentHint) == UUID(
+                uuidString: "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"
+              ),
+              let mediaContent = evidence.mediaContent,
+              (mediaContent == "Windows_NTFS" || (
+                  mediaContent.utf8.count == 36
+                      && UUID(uuidString: mediaContent) == UUID(
+                          uuidString: "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"
+                      )
+              ))
+        else {
+            return false
+        }
+        return true
+    }
+
+    /// A narrow UI classification for an unmounted GPT EFI sibling. It does
+    /// not change `isComplete`, create a snapshot, or authorize helper work.
+    func isRecognizedUnMountedEFIPartition(
+        on disk: ReadOnlyPhysicalDiskRecord
+    ) -> Bool {
+        let diskBSDName = disk.instanceID.physicalDiskID.rawValue
+        guard disk.issues.isEmpty,
+              disk.instanceID.mediaGeneration.rawValue != 0,
+              disk.description.isWholeDisk == true,
+              disk.description.bsdName == diskBSDName,
+              disk.description.physicalDiskBSDName == diskBSDName,
+              disk.description.mediaContent == "GUID_partition_scheme",
+              disk.description.isInternal != nil,
+              disk.volumes.contains(self),
+              evidence.physicalDiskBSDName == diskBSDName,
+              evidence.isInternal == disk.description.isInternal,
+              evidence.bsdName != nil,
+              evidence.roleEvidence == .unknown,
+              evidence.fileSystemName == "msdos",
+              evidence.diskArbitrationMountPoint == nil,
+              mountObservation == nil,
+              snapshot == nil,
+              candidate == nil,
+              let mediaRegistryID = evidence.mediaRegistryID,
+              mediaRegistryID != 0,
+              let mediaUUID = evidence.mediaUUID,
+              mediaUUID.utf8.count == 36,
+              let parsedMediaUUID = UUID(uuidString: mediaUUID),
+              parsedMediaUUID.uuidString != "00000000-0000-0000-0000-000000000000",
+              let contentHint = evidence.mediaContentHint,
+              contentHint.utf8.count == 36,
+              UUID(uuidString: contentHint) == UUID(
+                uuidString: "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
+              ),
+              let mediaContent = evidence.mediaContent,
+              mediaContent.utf8.count == 36,
+              UUID(uuidString: mediaContent) == UUID(
+                uuidString: "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
+              ),
+              issues.contains(.unknownVolumeRole),
+              issues.allSatisfy({ issue in
+                  switch issue {
+                  case .missingVolumeUUID, .missingDisplayName, .unknownVolumeRole:
+                      true
+                  default:
+                      false
+                  }
+              })
+        else {
+            return false
+        }
+        return true
     }
 }
 

@@ -19,26 +19,58 @@ public enum SetupRequirementState: Equatable, Sendable {
     case checking
 }
 
+/// This only hides a misleading registration action from development bundles.
+/// The helper must independently verify installation ownership, permissions and signature.
+public enum HelperEnablementUI {
+    public static func shouldOfferRegistration(for appBundleURL: URL) -> Bool {
+        appBundleURL.isFileURL
+            && appBundleURL.standardizedFileURL.path
+                == "/Library/PrivilegedHelperTools/NTFSLite.app"
+    }
+}
+
 public struct SetupRequirementPresentation: Equatable, Sendable {
     public let id: SetupRequirementID
     public let state: SetupRequirementState
     public let statusText: String
     public let title: String
     public let detail: String
+    public let observedConflictCount: Int?
+    public let conflictScanIncomplete: Bool
 
     init(
         id: SetupRequirementID,
         state: SetupRequirementState,
         statusText: String,
         title: String,
-        detail: String
+        detail: String,
+        observedConflictCount: Int? = nil,
+        conflictScanIncomplete: Bool = false
     ) {
         self.id = id
         self.state = state
         self.statusText = statusText
         self.title = title
         self.detail = detail
+        self.observedConflictCount = observedConflictCount
+        self.conflictScanIncomplete = conflictScanIncomplete
     }
+}
+
+public enum SetupRequirementGroupID: Equatable, Hashable, Sendable {
+    case systemCompatibility
+    case writeComponents
+    case fsKitSupport
+    case otherChecks
+}
+
+public struct SetupRequirementGroupPresentation: Equatable, Sendable {
+    public let id: SetupRequirementGroupID
+    public let title: String
+    public let detail: String
+    public let state: SetupRequirementState
+    public let statusText: String
+    public let requirements: [SetupRequirementPresentation]
 }
 
 public enum SetupPresentationAction: Equatable, Sendable {
@@ -67,6 +99,35 @@ public struct SetupPresentation: Equatable, Sendable {
     public let isReady: Bool
     public let isBusy: Bool
 
+    public var groups: [SetupRequirementGroupPresentation] {
+        [
+            group(
+                id: .systemCompatibility,
+                title: "系统兼容",
+                detail: "macOS 版本与处理器架构。",
+                ids: [.operatingSystem, .architecture]
+            ),
+            group(
+                id: .writeComponents,
+                title: "写入组件",
+                detail: "macFUSE 与应用内 NTFS-3G 的独立校验。",
+                ids: [.macFUSE, .ntfs3G]
+            ),
+            group(
+                id: .fsKitSupport,
+                title: "FSKit 支持",
+                detail: "文件系统扩展与 FSKit 后端。",
+                ids: [.fileSystemExtension, .backend]
+            ),
+            group(
+                id: .otherChecks,
+                title: "其他诊断",
+                detail: "授权与已知驱动冲突的独立检查。",
+                ids: [.authorization, .conflictingDrivers]
+            ),
+        ]
+    }
+
     init(
         title: String,
         detail: String,
@@ -83,6 +144,62 @@ public struct SetupPresentation: Equatable, Sendable {
         self.secondaryActions = secondaryActions
         self.isReady = isReady
         self.isBusy = isBusy
+    }
+
+    private func group(
+        id: SetupRequirementGroupID,
+        title: String,
+        detail: String,
+        ids: [SetupRequirementID]
+    ) -> SetupRequirementGroupPresentation {
+        let members = ids.compactMap { id in
+            requirements.first { $0.id == id }
+        }
+        let state: SetupRequirementState
+        if members.contains(where: { $0.state == .actionRequired }) {
+            state = .actionRequired
+        } else if members.count != ids.count || members.contains(where: { $0.state == .checking }) {
+            state = .checking
+        } else {
+            state = .satisfied
+        }
+        let conflictRequirement = id == .otherChecks
+            ? members.first { $0.id == .conflictingDrivers }
+            : nil
+        let observedConflictCount = conflictRequirement?.observedConflictCount
+        let statusText: String = if observedConflictCount != nil {
+            "发现冲突"
+        } else { switch state {
+        case .satisfied: "已满足"
+        case .actionRequired: "待确认"
+        case .checking: "检查中"
+        } }
+        let groupDetail: String
+        if let observedConflictCount {
+            let countText = observedConflictCount == 0
+                ? "至少 1 个"
+                : "\(observedConflictCount) 个"
+            groupDetail = conflictRequirement?.conflictScanIncomplete == true
+                ? "发现\(countText)已知冲突驱动；此次扫描仍未完成，结果只覆盖已检查范围。展开查看详情。"
+                : "发现\(countText)已知冲突驱动；展开查看详情及扫描范围。"
+        } else if id == .writeComponents
+                    && members.contains(where: { $0.statusText == "未配置" }) {
+            let pendingTitles = members
+                .filter { $0.state == .actionRequired }
+                .map(\.title)
+                .joined(separator: "；")
+            groupDetail = "\(pendingTitles)。展开查看详情。"
+        } else {
+            groupDetail = detail
+        }
+        return SetupRequirementGroupPresentation(
+            id: id,
+            title: title,
+            detail: groupDetail,
+            state: state,
+            statusText: statusText,
+            requirements: members
+        )
     }
 }
 
@@ -104,8 +221,8 @@ public enum SetupPresenter {
     ) -> SetupPresentation {
         if isRefreshing {
             return SetupPresentation(
-                title: "正在检查运行环境",
-                detail: "正在重新读取系统、依赖和后端状态；完成前写入保持关闭。",
+                title: "正在进行只读环境检查",
+                detail: "正在重新读取系统、依赖和后端状态；此页只读取系统状态，写入时帮助程序会另行核对目标磁盘及挂载结果。",
                 requirements: requirementOrder.map(checkingRequirement),
                 primaryAction: nil,
                 secondaryActions: [],
@@ -115,14 +232,22 @@ public enum SetupPresenter {
         }
 
         let issuesByRequirement = normalizedIssues(assessment.issues)
+        let conflictScanIncomplete = assessment.issues.contains { issue in
+            if case .conflictScanIncomplete = issue { return true }
+            return false
+        }
         let requirements = requirementOrder.map { id in
-            requirement(id: id, issue: issuesByRequirement[id])
+            requirement(
+                id: id,
+                issue: issuesByRequirement[id],
+                conflictScanIncomplete: conflictScanIncomplete
+            )
         }
 
         if assessment.isReady {
             return SetupPresentation(
-                title: "首次设置已完成",
-                detail: "运行环境符合当前安全要求；写入操作仍会在每次执行前重新检查。",
+                title: "只读环境检查完成",
+                detail: "当前检查项目均已满足；写入时帮助程序会重新核对目标磁盘及挂载结果。",
                 requirements: requirements,
                 primaryAction: .recheck,
                 secondaryActions: [],
@@ -132,8 +257,8 @@ public enum SetupPresenter {
         }
 
         return SetupPresentation(
-            title: "首次设置未完成",
-            detail: "有 \(issuesByRequirement.count) 项需要处理；完成后重新检查，在此之前写入保持关闭。",
+            title: "只读环境检查有待确认",
+            detail: "部分检查有待确认；请按类别查看详情。写入时帮助程序会另行核对目标磁盘及挂载结果。",
             requirements: requirements,
             primaryAction: .continueSetup,
             secondaryActions: [.copyDiagnostics],
@@ -170,12 +295,18 @@ public enum SetupPresenter {
                 requirement
             }
         }
+        let buildTrustPolicyMissing = report.macFUSEEvidence == .notConfigured
+            || report.ntfs3GEvidence == .notConfigured
         return SetupPresentation(
-            title: base.title,
-            detail: base.detail,
+            title: buildTrustPolicyMissing
+                ? "独立可信报告未配置"
+                : base.title,
+            detail: buildTrustPolicyMissing
+                ? "此页尚未配置独立的依赖可信报告，不能据此判断依赖是否缺失，也不决定帮助程序的写入资格。帮助程序每次操作会另行核验目标磁盘与挂载条件；其他检查结果可重新读取。"
+                : base.detail,
             requirements: requirements,
-            primaryAction: base.primaryAction,
-            secondaryActions: base.secondaryActions,
+            primaryAction: buildTrustPolicyMissing ? .recheck : base.primaryAction,
+            secondaryActions: buildTrustPolicyMissing ? [.copyDiagnostics] : base.secondaryActions,
             isReady: base.isReady,
             isBusy: base.isBusy
         )
@@ -192,9 +323,9 @@ public enum SetupPresenter {
             return SetupRequirementPresentation(
                 id: .macFUSE,
                 state: .actionRequired,
-                statusText: "待处理",
-                title: "配置 macFUSE 信任策略",
-                detail: "此构建尚未配置受信任校验策略，不能据此判断为未安装；写入保持关闭。"
+                statusText: "未配置",
+                title: "macFUSE 独立可信报告未配置",
+                detail: "此页尚未配置受信任校验策略，不能据此判断 macFUSE 是否已安装。帮助程序在操作时另行核验挂载条件。"
             )
         case let .failedClosed(failure):
             return SetupRequirementPresentation(
@@ -202,7 +333,7 @@ public enum SetupPresenter {
                 state: .actionRequired,
                 statusText: "待处理",
                 title: "macFUSE 可信校验未通过",
-                detail: "固定失败码 \(macFUSEFailureCode(failure))。请核对批准策略、安装来源和文件权限；写入保持关闭。"
+                detail: "固定失败码 \(macFUSEFailureCode(failure))。请核对批准策略、安装来源和文件权限；此项检查未通过。"
             )
         }
     }
@@ -266,9 +397,9 @@ public enum SetupPresenter {
             return SetupRequirementPresentation(
                 id: .ntfs3G,
                 state: .actionRequired,
-                statusText: "待处理",
-                title: "配置 NTFS-3G 信任策略",
-                detail: "此构建尚未配置受信任校验策略，不能据此判断为未安装；写入保持关闭。"
+                statusText: "未配置",
+                title: "NTFS-3G 独立可信报告未配置",
+                detail: "此页尚未配置受信任校验策略，不能据此判断 NTFS-3G 是否已安装。帮助程序在操作时另行核验固定驱动与挂载条件。"
             )
         case let .failedClosed(failure):
             return SetupRequirementPresentation(
@@ -276,7 +407,7 @@ public enum SetupPresenter {
                 state: .actionRequired,
                 statusText: "待处理",
                 title: "NTFS-3G 可信校验未通过",
-                detail: "固定失败码 \(ntfs3GFailureCode(failure))。请核对批准目录、制品来源和文件权限；写入保持关闭。"
+                detail: "固定失败码 \(ntfs3GFailureCode(failure))。请核对批准目录、制品来源和文件权限；此项检查未通过。"
             )
         }
     }
@@ -455,7 +586,10 @@ public enum SetupPresenter {
             .requiredAuthorizationUnavailable(rhsValue)
         ):
             return authorizationRank(lhsValue) <= authorizationRank(rhsValue) ? lhs : rhs
-        case (.conflictScanIncomplete, _), (_, .conflictScanIncomplete):
+        case let (.conflictScanIncomplete, .conflictingDrivers(drivers)),
+             let (.conflictingDrivers(drivers), .conflictScanIncomplete):
+            return .conflictingDrivers(drivers)
+        case (.conflictScanIncomplete, .conflictScanIncomplete):
             return .conflictScanIncomplete
         case let (.conflictingDrivers(lhsValues), .conflictingDrivers(rhsValues)):
             return .conflictingDrivers(lhsValues + rhsValues)
@@ -479,7 +613,8 @@ public enum SetupPresenter {
 
     private static func requirement(
         id: SetupRequirementID,
-        issue: SetupIssue?
+        issue: SetupIssue?,
+        conflictScanIncomplete: Bool
     ) -> SetupRequirementPresentation {
         guard let issue else {
             let content = satisfiedContent(for: id)
@@ -493,12 +628,23 @@ public enum SetupPresenter {
         }
 
         let content = actionRequiredContent(for: issue)
+        let observedConflictCount: Int?
+        if case let .conflictingDrivers(drivers) = issue {
+            observedConflictCount = uniqueDriverCount(drivers)
+        } else {
+            observedConflictCount = nil
+        }
+        let detail = observedConflictCount != nil && conflictScanIncomplete
+            ? content.detail + "此次扫描仍未完成。"
+            : content.detail
         return SetupRequirementPresentation(
             id: id,
             state: .actionRequired,
             statusText: "待处理",
             title: content.title,
-            detail: content.detail
+            detail: detail,
+            observedConflictCount: observedConflictCount,
+            conflictScanIncomplete: observedConflictCount != nil && conflictScanIncomplete
         )
     }
 
@@ -551,8 +697,8 @@ public enum SetupPresenter {
             )
         case .fileSystemExtensionDisabled:
             return (
-                "启用 File System Extension",
-                "扩展尚未启用；在系统设置中允许后重新检查。"
+                "FSKit 扩展状态待确认",
+                "只读检查无法确认扩展状态，这不等于扩展未启用。帮助程序会在卸载原生卷前复核；无法确认时保持只读挂载。"
             )
         case .ntfs3GMissing:
             return (
@@ -565,6 +711,12 @@ public enum SetupPresenter {
                 "当前为 \(versionText(observed))，最低需要 \(versionText(minimum))；更新后重新检查。"
             )
         case let .unsafeBackend(backend):
+            if backend == .unknown {
+                return (
+                    "确认 FSKit 后端",
+                    "只读检查无法确认当前后端。帮助程序会在磁盘操作前核对固定的 FSKit 挂载方案。"
+                )
+            }
             return (
                 "改用 FSKit 后端",
                 "当前后端为 \(backendText(backend))；写入只允许使用 FSKit。"
@@ -572,16 +724,16 @@ public enum SetupPresenter {
         case let .requiredAuthorizationUnavailable(status):
             switch status {
             case .granted:
-                return ("重新检查必要授权", "授权事实不一致；写入保持关闭，请重新检查。")
+                return ("重新检查必要授权", "授权事实不一致；请重新检查。")
             case .denied:
                 return ("完成必要授权", "写入授权尚不可用；完成本机授权后重新检查。")
             case .unknown:
-                return ("检查必要授权", "无法确认写入授权状态；确认前写入保持关闭。")
+                return ("检查必要授权", "无法确认写入授权状态；请重新检查。")
             }
         case .conflictScanIncomplete:
             return (
                 "重新检查冲突驱动",
-                "未能完成冲突驱动扫描；确认没有其他 NTFS 写入驱动前保持只读。"
+                "未能完成冲突驱动扫描，当前无法确认无冲突；请检查后重新读取。"
             )
         case let .conflictingDrivers(drivers):
             let count = uniqueDriverCount(drivers)

@@ -15,10 +15,12 @@ fi
 info_plist="$app_dir/Contents/Info.plist"
 contents_dir="$app_dir/Contents"
 macos_dir="$contents_dir/MacOS"
+resources_dir="$contents_dir/Resources"
 if [[ ! -d "$contents_dir" || -L "$contents_dir" \
-    || ! -d "$macos_dir" || -L "$macos_dir" ]]
+    || ! -d "$macos_dir" || -L "$macos_dir" \
+    || ! -d "$resources_dir" || -L "$resources_dir" ]]
 then
-    print -u2 -r -- "FAIL: Contents 或 MacOS 目录缺失或是符号链接。"
+    print -u2 -r -- "FAIL: Contents、MacOS 或 Resources 目录缺失或是符号链接。"
     exit 1
 fi
 if [[ ! -f "$info_plist" || -L "$info_plist" ]]; then
@@ -35,6 +37,7 @@ executable_name=$(plist_value CFBundleExecutable)
 short_version=$(plist_value CFBundleShortVersionString)
 build_version=$(plist_value CFBundleVersion)
 minimum_system=$(plist_value LSMinimumSystemVersion)
+icon_file=$(plist_value CFBundleIconFile)
 
 if [[ "$bundle_id" != "com.leolu.ntfslite.readonly" ]]; then
     print -u2 -r -- "FAIL: bundle identifier 不符合只读应用策略。"
@@ -42,6 +45,10 @@ if [[ "$bundle_id" != "com.leolu.ntfslite.readonly" ]]; then
 fi
 if [[ "$executable_name" != "NTFSLiteReadOnlyApp" ]]; then
     print -u2 -r -- "FAIL: 主可执行文件名不符合只读应用策略。"
+    exit 1
+fi
+if [[ "$icon_file" != "NTFSLite.icns" ]]; then
+    print -u2 -r -- "FAIL: App 图标声明不符合固定策略。"
     exit 1
 fi
 if [[ ! "$short_version" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' \
@@ -57,16 +64,31 @@ if [[ ! -f "$binary" || -L "$binary" || ! -x "$binary" ]]; then
     print -u2 -r -- "FAIL: 主可执行文件缺失、不可执行或是符号链接。"
     exit 1
 fi
+icon="$resources_dir/$icon_file"
+if [[ ! -f "$icon" || -L "$icon" ]]; then
+    print -u2 -r -- "FAIL: App 图标缺失或不可信。"
+    exit 1
+fi
+if [[ "$(/usr/bin/sips -g format "$icon" 2>/dev/null)" != *$'format: icns'* ]]; then
+    print -u2 -r -- "FAIL: App 图标格式不是有效 icns。"
+    exit 1
+fi
 
 setopt local_options null_glob dot_glob
 contents_entries=("$contents_dir"/*(DN))
 macos_entries=("$macos_dir"/*(DN))
-if (( ${#contents_entries[@]} != 3 )) \
+resource_entries=("$resources_dir"/*(DN))
+if (( ${#contents_entries[@]} != 4 )) \
     || [[ ! -e "$contents_dir/Info.plist" \
         || ! -d "$contents_dir/MacOS" \
+        || ! -d "$contents_dir/Resources" \
         || ! -d "$contents_dir/_CodeSignature" ]]
 then
     print -u2 -r -- "FAIL: Contents 不符合本地只读包的固定允许清单。"
+    exit 1
+fi
+if (( ${#resource_entries[@]} != 1 )) || [[ "${resource_entries[1]}" != "$icon" ]]; then
+    print -u2 -r -- "FAIL: Resources 目录必须且只能包含批准的 App 图标。"
     exit 1
 fi
 if (( ${#macos_entries[@]} != 1 )) || [[ "${macos_entries[1]}" != "$binary" ]]; then
@@ -122,6 +144,7 @@ codesign --verify --strict "$app_dir"
 
 binary_sha256=$(shasum -a 256 "$binary" | awk '{print $1}')
 plist_sha256=$(shasum -a 256 "$info_plist" | awk '{print $1}')
+icon_sha256=$(shasum -a 256 "$icon" | awk '{print $1}')
 
 print -r -- "PASS: 本地只读 App 允许清单、版本、Mach-O、arm64 与代码签名校验通过。"
 print -r -- "版本：$short_version ($build_version)"
@@ -130,3 +153,4 @@ print -r -- "架构：$architectures"
 print -r -- "签名范围：本地 ad-hoc；不构成 Developer ID、公证或 Gate 5 证据。"
 print -r -- "主程序 SHA-256：$binary_sha256"
 print -r -- "Info.plist SHA-256：$plist_sha256"
+print -r -- "App 图标 SHA-256：$icon_sha256"

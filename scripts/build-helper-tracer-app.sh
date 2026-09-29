@@ -37,15 +37,15 @@ for name in ${(k)pinned}; do
         || { print -u2 -r -- "FAIL: 固定驱动摘要不符：$name"; exit 1; }
     install -m 755 "$source_path" "$staging_app/Contents/Helpers/$name"
 done
-install -m 644 AppResources/com.leolu.ntfslite.helper.plist \
-    "$staging_app/Contents/Library/LaunchDaemons/com.leolu.ntfslite.helper.plist"
+install -m 644 AppResources/com.leolu.ntfslite.helper.v2.plist \
+    "$staging_app/Contents/Library/LaunchDaemons/com.leolu.ntfslite.helper.v2.plist"
 plutil -lint "$staging_app/Contents/Info.plist" "$staging_app/Contents/Library/LaunchDaemons/"*.plist
 
 sign() { codesign --force --options runtime --timestamp=none --sign "$identity" "$@"; }
 # The drivers load macFUSE's libfuse (another team), so they are signed without library validation.
 codesign --force --timestamp=none --sign "$identity" --identifier com.leolu.ntfslite.ntfs-3g "$staging_app/Contents/Helpers/ntfs-3g"
 codesign --force --timestamp=none --sign "$identity" --identifier com.leolu.ntfslite.ntfs-3g.probe "$staging_app/Contents/Helpers/ntfs-3g.probe"
-sign --identifier com.leolu.ntfslite.helper "$staging_app/Contents/MacOS/NTFSLiteHelper"
+sign --identifier com.leolu.ntfslite.helper.v2 "$staging_app/Contents/MacOS/NTFSLiteHelper"
 # The tracer acts as the formal app client for the helper's pinned requirement.
 sign --identifier com.leolu.ntfslite.readonly "$staging_app/Contents/MacOS/NTFSLiteHelperTracer"
 sign "$staging_app"

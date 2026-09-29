@@ -130,6 +130,14 @@ public enum ReadOnlySelectionPresenter {
 }
 
 public enum ReadOnlySetupInteractionPresenter {
+    public static func guideGroup(
+        for setup: SetupPresentation
+    ) -> SetupRequirementGroupPresentation? {
+        setup.groups.first { group in
+            group.requirements.contains { $0.state == .actionRequired }
+        }
+    }
+
     public static func primaryAction(
         for setup: SetupPresentation,
         guideRequirementID: SetupRequirementID?
@@ -152,22 +160,21 @@ public enum ReadOnlySetupInteractionPresenter {
         if setup.isReady {
             return "重新检查完成，运行环境已满足当前要求。"
         }
-        let actionRequiredCount = setup.requirements.count {
+        let pendingGroupCount = setup.groups.count {
             $0.state == .actionRequired
         }
-        guard actionRequiredCount > 0 else {
+        guard pendingGroupCount > 0 else {
             return "重新检查完成，但运行环境状态仍未确认。"
         }
-        return "重新检查完成，仍有 \(actionRequiredCount) 项需要处理。"
+        return "重新检查完成，仍有 \(pendingGroupCount) 类检查待确认。"
     }
 
     public static func guideFeedback(
-        requirementID: SetupRequirementID?
+        group: SetupRequirementGroupPresentation?
     ) -> ReadOnlyActionFeedback {
         ReadOnlyActionFeedback(
-            requirementID == nil
-                ? "当前没有可继续的设置步骤，请重新检查。"
-                : "已展开首个待处理项目。"
+            group.map { "已展开“\($0.title)”；请查看其中的待确认检查。" }
+                ?? "当前没有可继续的设置步骤，请重新检查。"
         )
     }
 

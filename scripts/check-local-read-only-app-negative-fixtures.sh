@@ -88,12 +88,31 @@ expect_rejected() {
 positive_output=$("$verify_script" "$source_app")
 if [[ "$positive_output" != *"主程序 SHA-256"* \
     || "$positive_output" != *"Info.plist SHA-256"* \
+    || "$positive_output" != *"App 图标 SHA-256"* \
     || "$positive_output" != *"本地 ad-hoc"* \
     || "$positive_output" != *"Gate 5"* ]]
 then
     print -u2 -r -- "FAIL: 正向验证输出缺少摘要或 ad-hoc/Gate 5 边界说明。"
     exit 1
 fi
+
+missing_icon_fixture=$(make_fixture missing-app-icon)
+mv "$missing_icon_fixture/Contents/Resources/NTFSLite.icns" \
+    "$fixture_root/missing-app-icon.icns"
+expect_rejected \
+    "缺失 App 图标" \
+    "$missing_icon_fixture" \
+    "App 图标缺失或不可信"
+
+extra_icon_fixture=$(make_fixture extra-app-resource)
+install -m 644 \
+    "$source_app/Contents/Resources/NTFSLite.icns" \
+    "$extra_icon_fixture/Contents/Resources/Unapproved.icns"
+codesign --force --sign - "$extra_icon_fixture" >/dev/null 2>&1
+expect_rejected \
+    "额外 App 资源" \
+    "$extra_icon_fixture" \
+    "Resources 目录必须且只能包含批准的 App 图标"
 
 symlink_fixture=$(make_fixture extra-symlink)
 ln -s ../Info.plist \
@@ -159,4 +178,4 @@ expect_rejected \
     "$wrong_target_fixture" \
     "deployment target 不符合固定的 macOS 15.4 策略"
 
-print -r -- "PASS: 5 组本地只读包负向 fixture 全部按预期失败关闭。"
+print -r -- "PASS: 7 组本地只读包负向 fixture 全部按预期失败关闭。"

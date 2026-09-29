@@ -12,32 +12,37 @@ public enum HelperRequestCompilationError: Error, Equatable, Sendable {
 /// protocol. It does not connect to a helper or execute any disk operation.
 public enum HelperRequestCompiler {
     public static func compile(
-        effect: VolumeEffect
+        effect: VolumeEffect,
+        diskBinding: HelperDiskInstanceIdentity? = nil
     ) -> Result<HelperRequestEnvelope, HelperRequestCompilationError> {
         switch effect {
         case let .unmountStandard(operationID, target):
             return compileVolume(
                 operationID: operationID,
                 target: target,
-                action: .unmountVolume
+                action: .unmountVolume,
+                diskBinding: diskBinding
             )
         case let .mountReadWrite(plan):
             return compileVolume(
                 operationID: plan.operationID,
                 target: plan.target,
-                action: .mountReadWrite
+                action: .mountReadWrite,
+                diskBinding: diskBinding
             )
         case let .unmountPhysicalDiskStandard(operationID, target):
             return compileDisk(
                 operationID: operationID,
                 target: target,
-                action: .unmountDisk
+                action: .unmountDisk,
+                diskBinding: diskBinding
             )
         case let .ejectPhysicalDiskStandard(operationID, target):
             return compileDisk(
                 operationID: operationID,
                 target: target,
-                action: .ejectDisk
+                action: .ejectDisk,
+                diskBinding: diskBinding
             )
         case .none,
             .inspectPhysicalDisk,
@@ -52,10 +57,11 @@ public enum HelperRequestCompiler {
     private static func compileVolume(
         operationID: OperationID,
         target: VolumeInstanceID,
-        action: HelperAction
+        action: HelperAction,
+        diskBinding: HelperDiskInstanceIdentity?
     ) -> Result<HelperRequestEnvelope, HelperRequestCompilationError> {
         do {
-            let disk = try helperDiskIdentity(target.diskInstanceID)
+            let disk = try helperDiskIdentity(target.diskInstanceID, diskBinding: diskBinding)
             let volume = try HelperVolumeInstanceIdentity(
                 volumeUUID: target.volumeID.uuid,
                 volumeBSDName: target.volumeID.bsdName,
@@ -76,13 +82,14 @@ public enum HelperRequestCompiler {
     private static func compileDisk(
         operationID: OperationID,
         target: DiskInstanceID,
-        action: HelperAction
+        action: HelperAction,
+        diskBinding: HelperDiskInstanceIdentity?
     ) -> Result<HelperRequestEnvelope, HelperRequestCompilationError> {
         do {
             return try envelope(
                 operationID: operationID,
                 action: action,
-                target: .disk(helperDiskIdentity(target))
+                target: .disk(try helperDiskIdentity(target, diskBinding: diskBinding))
             )
         } catch let rejection as HelperRequestRejection {
             return .failure(compilationError(for: rejection))
@@ -92,12 +99,14 @@ public enum HelperRequestCompiler {
     }
 
     private static func helperDiskIdentity(
-        _ target: DiskInstanceID
+        _ target: DiskInstanceID,
+        diskBinding: HelperDiskInstanceIdentity?
     ) throws -> HelperDiskInstanceIdentity {
-        try HelperDiskInstanceIdentity(
-            physicalDiskBSDName: target.physicalDiskID.rawValue,
-            mediaGeneration: target.mediaGeneration.rawValue
-        )
+        guard let diskBinding,
+              diskBinding.physicalDiskBSDName == target.physicalDiskID.rawValue,
+              diskBinding.mediaGeneration == target.mediaGeneration.rawValue
+        else { throw HelperRequestRejection.invalidIdentity }
+        return diskBinding
     }
 
     private static func envelope(

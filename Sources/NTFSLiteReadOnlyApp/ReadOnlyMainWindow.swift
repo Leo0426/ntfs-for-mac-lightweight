@@ -98,35 +98,69 @@ struct ReadOnlyMainWindow: View {
 
     private var header: some View {
         ViewThatFits(in: .horizontal) {
-            HStack(spacing: 16) {
-                phaseNotice
+            HStack(spacing: 18) {
+                appIdentity
                 Spacer(minLength: 12)
-                Button("重新读取") {
-                    store.refresh()
-                }
+                observationBadge
+                refreshButton
             }
-            VStack(alignment: .leading, spacing: 10) {
-                phaseNotice
-                Button("重新读取") {
-                    store.refresh()
-                }
+            HStack(spacing: 12) {
+                appIdentity
+                Spacer(minLength: 8)
+                refreshButton
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
         .background(.regularMaterial)
     }
 
-    private var phaseNotice: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("只读观察阶段")
-                .font(.headline)
-            Text("当前版本不会挂载、卸载、推出或修改磁盘")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+    private var appIdentity: some View {
+        HStack(spacing: 11) {
+            Image(systemName: "externaldrive.fill")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 40, height: 40)
+                .background(Color.accentColor.opacity(0.11), in: RoundedRectangle(cornerRadius: 11))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("NTFS 轻量助手")
+                    .font(.headline)
+                Text("外置磁盘状态与安全操作")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
         }
-        .accessibilityElement(children: .combine)
+    }
+
+    private var observationBadge: some View {
+        let declarationAvailable = store.dashboard.volumes.contains {
+            $0.actions.canEnableWriting && $0.actions.requiresDataDeclaration
+        }
+        let status: (symbol: String, title: String, color: Color) = switch store.dashboard.phase {
+        case .scanning: ("arrow.triangle.2.circlepath", "正在检查", .secondary)
+        case .limited: declarationAvailable
+            ? ("questionmark.circle.fill", "请确认卷用途", .orange)
+            : ("exclamationmark.circle.fill", "信息待确认", .orange)
+        case .settled: ("checkmark.circle.fill", "磁盘检查完成", .green)
+        }
+        return Label(status.title, systemImage: status.symbol)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(status.color)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(status.color.opacity(0.10), in: Capsule())
+    }
+
+    private var refreshButton: some View {
+        Button {
+            store.refresh()
+        } label: {
+            Label("重新读取", systemImage: "arrow.clockwise")
+        }
+        .buttonStyle(.bordered)
+        .help("重新读取磁盘与运行环境状态")
     }
 
     private var wideContent: some View {
@@ -154,23 +188,28 @@ struct ReadOnlyMainWindow: View {
 
     private var sidebar: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                sidebarGroup(title: "概览") {
-                    sidebarButton("概览", selection: .overview)
+            VStack(alignment: .leading, spacing: 18) {
+                sidebarGroup(title: "工作台") {
+                    sidebarButton("概览", symbol: "square.grid.2x2", selection: .overview)
                 }
                 ForEach(store.dashboard.physicalDisks) { disk in
                     sidebarGroup(title: disk.title) {
                         ForEach(disk.volumes) { volume in
-                            sidebarButton(volume.title, selection: .volume(volume.id))
+                            sidebarButton(
+                                volume.title,
+                                symbol: "externaldrive",
+                                subtitle: volume.accessText,
+                                selection: .volume(volume.id)
+                            )
                         }
                     }
                 }
-                sidebarGroup(title: "设置") {
-                    sidebarButton("运行环境", selection: .environment)
-                    sidebarButton("诊断摘要", selection: .diagnostics)
+                sidebarGroup(title: "工具") {
+                    sidebarButton("运行环境", symbol: "checklist", selection: .environment)
+                    sidebarButton("诊断摘要", symbol: "waveform.path.ecg", selection: .diagnostics)
                 }
             }
-            .padding(10)
+            .padding(12)
         }
         .background(Color(nsColor: .controlBackgroundColor))
     }
@@ -212,18 +251,36 @@ struct ReadOnlyMainWindow: View {
 
     private func sidebarButton(
         _ title: String,
+        symbol: String,
+        subtitle: String? = nil,
         selection target: ReadOnlyDashboardSelection
     ) -> some View {
         Button {
             retainedSelection = target
         } label: {
-            Text(title)
-                .fontWeight(presentedSelection == target ? .semibold : .regular)
-                .lineLimit(2)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 9)
-                .contentShape(Rectangle())
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: symbol)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(presentedSelection == target ? Color.accentColor : Color.secondary)
+                    .frame(width: 18)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .fontWeight(presentedSelection == target ? .semibold : .regular)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .focused($navigationFocus, equals: .wide(target))
@@ -248,9 +305,19 @@ struct ReadOnlyMainWindow: View {
                     in: store.dashboard
                 ) {
                 case .overview:
-                    ReadOnlyOverview(dashboard: store.dashboard, writeController: store.writeController)
+                    ReadOnlyOverview(
+                        dashboard: store.dashboard,
+                        writeController: store.writeController,
+                        selectVolume: { retainedSelection = .volume($0) },
+                        openEnvironment: { retainedSelection = .environment }
+                    )
                 case let .volume(volume, disk):
-                    ReadOnlyVolumeDetail(volume: volume, physicalDisk: disk, writeController: store.writeController)
+                    ReadOnlyVolumeDetail(
+                        volume: volume,
+                        physicalDisk: disk,
+                        writeController: store.writeController,
+                        openEnvironment: { retainedSelection = .environment }
+                    )
                 case .environment:
                     ReadOnlySetupDetail(store: store, setup: store.dashboard.setup)
                 case .diagnostics:
@@ -258,9 +325,10 @@ struct ReadOnlyMainWindow: View {
                 }
             }
             .padding(24)
-            .frame(maxWidth: 680, alignment: .leading)
+            .frame(maxWidth: 760, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .id(presentedSelection)
     }
 
     private func applySelectionReconciliation(
@@ -304,15 +372,22 @@ private struct ReadOnlyDiagnosticsDetail: View {
     @State private var isClearing = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 22) {
             VStack(alignment: .leading, spacing: 8) {
                 Text("诊断摘要")
                     .font(.largeTitle.bold())
                     .accessibilityAddTraits(.isHeader)
-                Text("只包含固定状态码、数量、版本和运行期数字别名；不包含用户名、完整路径、卷标、设备 UUID/BSD 名或驱动原名。")
+                Text("用于排查运行环境和磁盘识别问题。内容已按固定字段脱敏。")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            Label("不包含用户名、完整路径、卷标、设备 UUID 或 BSD 名。复制前仍可先检查下方内容。",
+                  systemImage: "hand.raised.shield")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .surfacePanel()
 
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 10) {
@@ -334,7 +409,7 @@ private struct ReadOnlyDiagnosticsDetail: View {
 
             GroupBox("结构化内容") {
                 ScrollView(.vertical) {
-                    Text(store.diagnosticsText)
+                    Text(readableDiagnosticsText)
                         .font(.system(.caption, design: .monospaced))
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -343,6 +418,17 @@ private struct ReadOnlyDiagnosticsDetail: View {
                 .frame(minHeight: 220, maxHeight: 360)
             }
         }
+    }
+
+    private var readableDiagnosticsText: String {
+        guard let input = store.diagnosticsText.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: input),
+              let formatted = try? JSONSerialization.data(
+                  withJSONObject: object, options: [.prettyPrinted, .sortedKeys]
+              ),
+              let text = String(data: formatted, encoding: .utf8)
+        else { return store.diagnosticsText }
+        return text
     }
 
     private var copySummaryButton: some View {
@@ -391,54 +477,119 @@ private struct ReadOnlyDiagnosticsDetail: View {
 private struct ReadOnlyOverview: View {
     let dashboard: ReadOnlyDashboardPresentation
     @ObservedObject var writeController: WriteController
+    let selectVolume: (VolumeInstanceID) -> Void
+    let openEnvironment: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            WritableVolumesSummary(controller: writeController)
-            VStack(alignment: .leading, spacing: 8) {
-                Text(dashboard.title)
+        VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("磁盘概览")
                     .font(.largeTitle.bold())
                     .accessibilityAddTraits(.isHeader)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(dashboard.detail)
+                Text("查看连接状态，选择一个卷继续。")
                     .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
-            .accessibilityElement(children: .combine)
 
-            if dashboard.phase == .scanning {
-                ProgressView("正在读取系统磁盘信息")
+            HStack(alignment: .top, spacing: 14) {
+                Image(systemName: dashboard.phase == .limited
+                    ? "exclamationmark.shield.fill" : "externaldrive.fill")
+                    .font(.system(size: 26, weight: .medium))
+                    .foregroundStyle(dashboard.phase == .limited ? Color.orange : Color.accentColor)
+                    .frame(width: 44)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(dashboard.title)
+                        .font(.title2.weight(.semibold))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(dashboard.detail)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if dashboard.phase == .scanning {
+                        ProgressView("正在读取系统磁盘信息")
+                            .padding(.top, 4)
+                    }
+                }
+                Spacer(minLength: 0)
             }
+            .surfacePanel()
+
+            WritableVolumesSummary(
+                controller: writeController,
+                openEnvironment: openEnvironment
+            )
 
             ForEach(dashboard.physicalDisks) { disk in
-                GroupBox(disk.title) {
-                    VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 9) {
+                        Image(systemName: "externaldrive.fill")
+                            .foregroundStyle(Color.accentColor)
+                            .accessibilityHidden(true)
+                        Text(disk.title)
+                            .font(.headline)
+                        Spacer()
+                        Text("\(disk.volumes.count) 个卷")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    VStack(alignment: .leading, spacing: 11) {
                         Text(disk.detail)
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                         ForEach(disk.volumes) { volume in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(volume.title)
-                                    .fontWeight(.semibold)
-                                Text("挂载状态：\(volume.accessText)")
-                                Text(volume.detail)
-                                    .foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
+                            Button {
+                                selectVolume(volume.id)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: "doc.on.externaldrive")
+                                        .foregroundStyle(Color.accentColor)
+                                        .accessibilityHidden(true)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(volume.title)
+                                            .fontWeight(.medium)
+                                            .lineLimit(2)
+                                            .truncationMode(.middle)
+                                        Text(volume.accessText)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer(minLength: 4)
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.tertiary)
+                                        .accessibilityHidden(true)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(12)
+                                .background(Color(nsColor: .controlBackgroundColor),
+                                            in: RoundedRectangle(cornerRadius: 10))
                             }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .accessibilityElement(children: .combine)
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("查看\(disk.title)中的\(volume.title)，\(volume.accessText)")
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .surfacePanel()
             }
 
-            GroupBox("当前功能边界") {
-                Text("界面仅展示只读系统事实。写入、安全推出、自动安装和系统设置变更均未开放。")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .fixedSize(horizontal: false, vertical: true)
+            if dashboard.physicalDisks.isEmpty && dashboard.phase == .settled {
+                VStack(alignment: .leading, spacing: 12) {
+                    Label("准备连接磁盘", systemImage: "cable.connector")
+                        .font(.headline)
+                    Text("连接外置 NTFS 磁盘后会自动显示。第一次使用时，可以先查看运行环境。")
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("查看运行环境", action: openEnvironment)
+                        .buttonStyle(.bordered)
+                }
+                .surfacePanel()
             }
+
+            Label("写入能力基于有限的实物验证，Windows 端复核和长期兼容性验证尚未完成。重要数据请先备份。",
+                  systemImage: "info.circle")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -447,41 +598,62 @@ private struct ReadOnlyVolumeDetail: View {
     let volume: ReadOnlyVolumePresentation
     let physicalDisk: ReadOnlyPhysicalDiskPresentation
     @ObservedObject var writeController: WriteController
+    let openEnvironment: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text(volume.title)
-                .font(.largeTitle.bold())
-                .lineLimit(2)
-                .truncationMode(.middle)
-                .accessibilityAddTraits(.isHeader)
-
-            GroupBox("设备摘要") {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(physicalDisk.title)
-                        .fontWeight(.semibold)
-                    Text(physicalDisk.detail)
+        VStack(alignment: .leading, spacing: 22) {
+            HStack(alignment: .top, spacing: 16) {
+                Image(systemName: "externaldrive.fill")
+                    .font(.system(size: 27, weight: .medium))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 54, height: 54)
+                    .background(Color.accentColor.opacity(0.11),
+                                in: RoundedRectangle(cornerRadius: 14))
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(volume.title)
+                        .font(.largeTitle.bold())
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .accessibilityAddTraits(.isHeader)
+                    Text("NTFS 卷 · \(physicalDisk.title)")
                         .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityElement(children: .combine)
+                Spacer(minLength: 0)
             }
 
-            GroupBox("当前状态") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(volume.accessText)
-                        .font(.title3.weight(.semibold))
-                    Text(volume.detail)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 10) {
+                Label("原生分区的最近一次观察", systemImage: "circle.grid.cross")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(volume.accessText)
+                    .font(.title2.weight(.semibold))
+                Text(volume.detail)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .surfacePanel()
 
-            GroupBox("可执行操作") {
-                VolumeWriteActions(controller: writeController, volume: volume)
+            VStack(alignment: .leading, spacing: 8) {
+                Label("所在磁盘", systemImage: "square.stack.3d.up")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(physicalDisk.title)
+                    .font(.headline)
+                Text(physicalDisk.detail)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .surfacePanel()
+
+            VolumeWriteActions(
+                controller: writeController,
+                volume: volume,
+                physicalDisk: physicalDisk,
+                openEnvironment: openEnvironment
+            )
         }
     }
 }
@@ -489,65 +661,72 @@ private struct ReadOnlyVolumeDetail: View {
 private struct ReadOnlySetupDetail: View {
     @ObservedObject var store: ReadOnlyAppStore
     let setup: SetupPresentation
-    @State private var guideRequirementID: SetupRequirementID?
+    @State private var expandedSetupGroupID: SetupRequirementGroupID?
+    @AccessibilityFocusState private var focusedSetupGroupID: SetupRequirementGroupID?
     @State private var actionFeedback: ReadOnlyActionFeedback?
     @State private var isAwaitingRecheckResult = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 22) {
             VStack(alignment: .leading, spacing: 8) {
-                Text(setup.title)
+                Text("运行环境")
                     .font(.largeTitle.bold())
                     .accessibilityAddTraits(.isHeader)
-                Text(setup.detail)
+                Text("查看依赖和系统状态。启用写入时，帮助程序仍会重新核对目标磁盘与安全条件。")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if setup.isBusy {
-                ProgressView("正在检查运行环境")
-            }
-
-            VStack(spacing: 0) {
-                ForEach(Array(setup.requirements.enumerated()), id: \.offset) { index, row in
-                    HStack(alignment: .top, spacing: 14) {
-                        Text(row.statusText)
-                            .font(.callout.weight(.semibold))
-                            .foregroundStyle(statusColor(row.state))
-                            .frame(width: 58, alignment: .leading)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(row.title)
-                                .fontWeight(.semibold)
-                            Text(row.detail)
-                                .font(.callout)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 10) {
+                Label("后台帮助程序", systemImage: "lock.shield")
+                    .font(.headline)
+                Text(store.writeController.helperState.text)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let helperMessage = store.writeController.helperMessage {
+                    Text(helperMessage)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if store.writeController.helperState == .notRegistered {
+                    Button("启用帮助程序") {
+                        store.writeController.installHelper()
                     }
-                    .padding(.vertical, 10)
+                    .buttonStyle(.borderedProminent)
+                } else if store.writeController.helperState == .requiresApproval {
+                    Button("打开系统设置") {
+                        store.writeController.openHelperApprovalSettings()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                Button("重新检查帮助程序") {
+                    store.writeController.refreshHelperState()
+                }
+                .buttonStyle(.bordered)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .surfacePanel()
 
-                    if index < setup.requirements.count - 1 {
-                        Divider()
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("只读环境检查")
+                        .font(.headline)
+                    Spacer()
+                    if setup.isBusy {
+                        ProgressView().controlSize(.small)
+                            .accessibilityLabel("正在检查运行环境")
                     }
                 }
+                Text(setup.title + "。" + setup.detail)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .surfacePanel()
 
-            if let guideRequirement {
-                GroupBox("下一步") {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(guideRequirement.title)
-                            .fontWeight(.semibold)
-                        Text(guideRequirement.detail)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Text("完成手动步骤后使用“重新检查”。应用不会代替你修改系统设置。")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
+            ForEach(setup.groups, id: \.id) { group in
+                setupGroup(group)
             }
 
             if let primaryAction = visiblePrimaryAction {
@@ -574,7 +753,7 @@ private struct ReadOnlySetupDetail: View {
             }
 
             GroupBox("说明") {
-                Text("本页只检查并展示状态，不会下载依赖、请求提权、启用扩展或修改系统设置。")
+                Text("环境检查只读取系统状态。帮助程序安装需要你明确点击；应用不会自动下载依赖或更改系统设置。")
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -583,7 +762,6 @@ private struct ReadOnlySetupDetail: View {
             guard isAwaitingRecheckResult, !currentSetup.isBusy else {
                 return
             }
-            guideRequirementID = nil
             isAwaitingRecheckResult = false
             report(
                 ReadOnlySetupInteractionPresenter
@@ -599,26 +777,24 @@ private struct ReadOnlySetupDetail: View {
         )
     }
 
-    private var guideRequirement: SetupRequirementPresentation? {
-        if let guideRequirementID {
-            return setup.requirements.first {
-                $0.id == guideRequirementID && $0.state == .actionRequired
-            }
-        }
-        return nil
+    private var guideRequirementID: SetupRequirementID? {
+        setup.groups.first { $0.id == expandedSetupGroupID }?
+            .requirements.first { $0.state == .actionRequired }?.id
     }
 
     private func perform(_ action: SetupPresentationAction) {
         switch action {
         case .continueSetup:
-            guideRequirementID = setup.requirements.first {
-                $0.state == .actionRequired
-            }?.id
+            let group = ReadOnlySetupInteractionPresenter.guideGroup(for: setup)
+            expandedSetupGroupID = group?.id
             report(
                 ReadOnlySetupInteractionPresenter.guideFeedback(
-                    requirementID: guideRequirementID
+                    group: group
                 )
             )
+            if let group {
+                focusedSetupGroupID = group.id
+            }
         case .recheck:
             isAwaitingRecheckResult = true
             report(ReadOnlySetupInteractionPresenter.recheckStartedFeedback)
@@ -643,14 +819,84 @@ private struct ReadOnlySetupDetail: View {
         postAccessibilityAnnouncement(feedback.accessibilityAnnouncement)
     }
 
+    private func setupGroup(_ group: SetupRequirementGroupPresentation) -> some View {
+        DisclosureGroup(isExpanded: Binding(
+            get: { expandedSetupGroupID == group.id },
+            set: { expandedSetupGroupID = $0 ? group.id : nil }
+        )) {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(group.requirements, id: \.id) { row in
+                    Divider()
+                    setupRequirementRow(row)
+                }
+            }
+            .padding(.top, 8)
+        } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(group.title)
+                        .font(.headline)
+                    Spacer(minLength: 4)
+                    Text(group.statusText)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(statusColor(group.state))
+                }
+                Text(group.detail)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(group.title)，\(group.statusText)。\(group.detail)")
+        }
+        .accessibilityFocused($focusedSetupGroupID, equals: group.id)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .surfacePanel()
+    }
+
+    private func setupRequirementRow(_ row: SetupRequirementPresentation) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: requirementSymbol(row.state))
+                .foregroundStyle(statusColor(row.state))
+                .frame(width: 20)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(row.title)
+                        .fontWeight(.medium)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    Text(row.statusText)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(statusColor(row.state))
+                        .fixedSize()
+                }
+                Text(row.detail)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(row.title)，\(row.statusText)。\(row.detail)")
+    }
+
     private func statusColor(_ state: SetupRequirementState) -> Color {
         switch state {
         case .satisfied:
-            return .secondary
+            return .green
         case .actionRequired:
             return .orange
         case .checking:
             return .secondary
+        }
+    }
+
+    private func requirementSymbol(_ state: SetupRequirementState) -> String {
+        switch state {
+        case .satisfied: "checkmark.circle.fill"
+        case .actionRequired: "exclamationmark.circle.fill"
+        case .checking: "circle.dotted"
         }
     }
 }
@@ -660,4 +906,25 @@ private func postAccessibilityAnnouncement(_ text: String) {
         return
     }
     AccessibilityNotification.Announcement(text).post()
+}
+
+private struct SurfacePanel: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .padding(18)
+            .background(
+                Color(nsColor: .controlBackgroundColor),
+                in: RoundedRectangle(cornerRadius: 15, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
+            }
+    }
+}
+
+private extension View {
+    func surfacePanel() -> some View {
+        modifier(SurfacePanel())
+    }
 }

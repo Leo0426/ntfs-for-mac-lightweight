@@ -20,13 +20,16 @@ swift build \
     -Xswiftc -warnings-as-errors
 binary_dir=$(swift build -c release --show-bin-path)
 
-mkdir -p "$staging_app/Contents/MacOS"
+mkdir -p "$staging_app/Contents/MacOS" "$staging_app/Contents/Resources"
 install -m 755 \
     "$binary_dir/NTFSLiteReadOnlyApp" \
     "$staging_app/Contents/MacOS/NTFSLiteReadOnlyApp"
 install -m 644 \
     "$project_dir/AppResources/NTFSLiteReadOnlyApp-Info.plist" \
     "$staging_app/Contents/Info.plist"
+install -m 644 \
+    "$project_dir/AppResources/NTFSLite.icns" \
+    "$staging_app/Contents/Resources/NTFSLite.icns"
 
 plutil -lint "$staging_app/Contents/Info.plist"
 codesign --force --sign - "$staging_app"

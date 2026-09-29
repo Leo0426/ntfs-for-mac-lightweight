@@ -1,11 +1,11 @@
 import Foundation
-import Darwin
 import NTFSLiteHelperProtocol
 import NTFSLiteSystem
 import ServiceManagement
 
-// Tracer for SMAppService registration and the signed XPC channel (issues 02–04). Disk actions
-// are only for the user-authorized sacrificial disk; the helper re-verifies every fact itself.
+// Tracer for SMAppService registration and the signed XPC channel (issues 02–04).
+// The v2 helper protocol requires a complete, current IOMedia partition binding.
+// This tool does not construct that binding for a real disk, so disk commands fail closed.
 
 func emit(_ values: [String: String]) {
     let data = (try? JSONSerialization.data(withJSONObject: values, options: [.sortedKeys])) ?? Data()
@@ -60,13 +60,38 @@ case "register":
         if service.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
     }
 case "ping":
-    let request = try! HelperRequestEnvelope(
-        operationID: HelperOperationID(), action: .ejectDisk,
-        target: .disk(HelperDiskInstanceIdentity(physicalDiskBSDName: "disk999", mediaGeneration: 1))
-    )
-    let data = try! JSONEncoder().encode(request)
-    emit(["stage": "firstRequest", "reply": send(data)])
-    emit(["stage": "replayedRequest", "reply": send(data)])
+    // The ping tests the signed XPC channel and one-shot replay with a synthetic
+    // protocol-valid target. Never use a BSD name that currently exists.
+    let syntheticDiskName = "disk99999999999999999999999"
+    let syntheticPartitionName = syntheticDiskName + "s1"
+    guard let observedMedia = try? IOMediaEnumerationSnapshotProvider.live.currentSnapshot(),
+          !observedMedia.bsdNames.contains(syntheticDiskName),
+          !observedMedia.bsdNames.contains(syntheticPartitionName),
+          let partition = try? HelperPartitionIdentity(
+              bsdName: syntheticPartitionName,
+              registryEntryID: UInt64.max - 1,
+              mediaUUID: "00000000-0000-0000-0000-000000000001",
+              contentHint: "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7",
+              kind: .ntfsTarget
+          ),
+          let disk = try? HelperDiskInstanceIdentity(
+              physicalDiskBSDName: syntheticDiskName,
+              mediaGeneration: UInt64.max,
+              registryEntryID: UInt64.max,
+              mediaContent: "GUID_partition_scheme",
+              partitions: [partition]
+          ),
+          let request = try? HelperRequestEnvelope(
+              operationID: HelperOperationID(), action: .ejectDisk,
+              target: .disk(disk)
+          ),
+          let data = try? JSONEncoder().encode(request)
+    else {
+        emit(["stage": "identityUnavailable", "reason": "syntheticTargetNotProvenAbsent"])
+        exit(1)
+    }
+    emit(["stage": "firstRequest", "syntheticTarget": "true", "reply": send(data)])
+    emit(["stage": "replayedRequest", "syntheticTarget": "true", "reply": send(data)])
 case "unregister":
     do {
         try service.unregister()
@@ -75,43 +100,17 @@ case "unregister":
         emit(["stage": "unregisterFailed", "code": String((error as NSError).code)])
     }
 case "mount", "unmount":
-    let arguments = Array(CommandLine.arguments.dropFirst(2))
-    guard let volume = arguments.first, let whole = volume.range(of: #"^disk[0-9]+"#, options: .regularExpression)
+    guard let volume = CommandLine.arguments.dropFirst(2).first,
+          volume.range(of: #"^disk[0-9]+s[0-9]+$"#, options: .regularExpression) != nil
     else { emit(["stage": "usage"]); exit(2) }
-    let uuid = arguments.count > 1 ? arguments[1] : nativeVolumeUUID(bsd: volume)
-    guard let uuid,
-          let target = try? HelperVolumeInstanceIdentity(
-              volumeUUID: uuid, volumeBSDName: volume,
-              disk: HelperDiskInstanceIdentity(physicalDiskBSDName: String(volume[whole]), mediaGeneration: 1))
-    else { emit(["stage": "identityUnavailable"]); exit(1) }
-    let action: HelperAction = CommandLine.arguments[1] == "mount" ? .mountReadWrite : .unmountVolume
-    let request = try! HelperRequestEnvelope(operationID: HelperOperationID(), action: action, target: .volume(target))
-    emit(["stage": CommandLine.arguments[1], "volumeUUID": uuid, "reply": send(try! JSONEncoder().encode(request))])
+    emit(["stage": "identityUnavailable", "reason": "v2TopologyNotObserved"])
+    exit(1)
 case "unmount-disk", "eject":
     guard let disk = CommandLine.arguments.dropFirst(2).first,
-          let identity = try? HelperDiskInstanceIdentity(physicalDiskBSDName: disk, mediaGeneration: 1)
+          disk.range(of: #"^disk[0-9]+$"#, options: .regularExpression) != nil
     else { emit(["stage": "usage"]); exit(2) }
-    let action: HelperAction = CommandLine.arguments[1] == "eject" ? .ejectDisk : .unmountDisk
-    let request = try! HelperRequestEnvelope(operationID: HelperOperationID(), action: action, target: .disk(identity))
-    emit(["stage": CommandLine.arguments[1], "reply": send(try! JSONEncoder().encode(request))])
+    emit(["stage": "identityUnavailable", "reason": "v2TopologyNotObserved"])
+    exit(1)
 default:
-    emit(["stage": "usage", "commands": "status|register|ping|mount <diskNsM>|unmount <diskNsM> <uuid>|unmount-disk <diskN>|eject <diskN>|unregister"])
+    emit(["stage": "usage", "commands": "status|register|ping|unregister; disk mutation commands are disabled until complete v2 topology can be observed"])
 }
-
-/// The same identity the app uses for a natively mounted NTFS candidate (ADR 0008).
-func nativeVolumeUUID(bsd: String) -> String? {
-    let count = getfsstat(nil, 0, MNT_NOWAIT)
-    guard count > 0 else { return nil }
-    var entries = [FileSystemStatus](repeating: FileSystemStatus(), count: Int(count))
-    let filled = getfsstat(&entries, Int32(MemoryLayout<FileSystemStatus>.stride * Int(count)), MNT_NOWAIT)
-    for entry in entries.prefix(Int(max(filled, 0))) {
-        var copy = entry
-        let source = withUnsafePointer(to: &copy.f_mntfromname) {
-            $0.withMemoryRebound(to: CChar.self, capacity: Int(MNAMELEN)) { String(cString: $0) }
-        }
-        if source == "/dev/" + bsd { return MountedFileSystemUUIDReader.read(for: entry) }
-    }
-    return nil
-}
-
-typealias FileSystemStatus = statfs

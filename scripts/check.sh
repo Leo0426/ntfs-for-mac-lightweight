@@ -8,6 +8,23 @@ cd "$project_dir"
 swift build -c release -Xswiftc -warnings-as-errors
 binary_dir=$(swift build -c release --show-bin-path)
 "$binary_dir/NTFSLiteCoreChecks"
+standalone_checks=$(mktemp -d "${TMPDIR:-/tmp}/ntfslite-standalone-checks.XXXXXX")
+trap 'rm -rf "$standalone_checks"' EXIT
+swiftc -parse-as-library -warnings-as-errors \
+    Sources/NTFSLiteHelper/SecureHelperDeployment.swift \
+    Tests/SecureHelperDeploymentChecks/SecureHelperDeploymentChecks.swift \
+    -o "$standalone_checks/NTFSLiteSecureHelperDeploymentChecks"
+"$standalone_checks/NTFSLiteSecureHelperDeploymentChecks"
+swiftc -parse-as-library -warnings-as-errors \
+    Sources/NTFSLiteHelperExecution/BoundedMainRunLoopWait.swift \
+    Tests/BoundedMainRunLoopWaitChecks/main.swift \
+    -o "$standalone_checks/NTFSLiteBoundedMainRunLoopWaitChecks"
+"$standalone_checks/NTFSLiteBoundedMainRunLoopWaitChecks"
+swiftc -parse-as-library -warnings-as-errors \
+    Sources/NTFSLiteHelper/HelperIdleExitGate.swift \
+    Tests/HelperIdleExitGateChecks/main.swift \
+    -o "$standalone_checks/NTFSLiteHelperIdleExitGateChecks"
+"$standalone_checks/NTFSLiteHelperIdleExitGateChecks"
 python3 scripts/check-gate1-cli-input.py
 python3 -m unittest discover -s scripts/write-validation -p 'test_*.py'
 

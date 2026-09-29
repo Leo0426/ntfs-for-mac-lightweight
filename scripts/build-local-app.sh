@@ -20,12 +20,13 @@ for product in NTFSLiteReadOnlyApp NTFSLiteHelper; do
 done
 binary_dir=$(swift build -c release --show-bin-path)
 
-mkdir -p "$staging_app/Contents/MacOS" "$staging_app/Contents/Library/LaunchDaemons" "$staging_app/Contents/Helpers"
+mkdir -p "$staging_app/Contents/MacOS" "$staging_app/Contents/Library/LaunchDaemons" "$staging_app/Contents/Helpers" "$staging_app/Contents/Resources"
 install -m 755 "$binary_dir/NTFSLiteReadOnlyApp" "$staging_app/Contents/MacOS/NTFSLiteReadOnlyApp"
 install -m 755 "$binary_dir/NTFSLiteHelper" "$staging_app/Contents/MacOS/NTFSLiteHelper"
 install -m 644 AppResources/NTFSLiteReadOnlyApp-Info.plist "$staging_app/Contents/Info.plist"
-install -m 644 AppResources/com.leolu.ntfslite.helper.plist \
-    "$staging_app/Contents/Library/LaunchDaemons/com.leolu.ntfslite.helper.plist"
+install -m 644 AppResources/NTFSLite.icns "$staging_app/Contents/Resources/NTFSLite.icns"
+install -m 644 AppResources/com.leolu.ntfslite.helper.v2.plist \
+    "$staging_app/Contents/Library/LaunchDaemons/com.leolu.ntfslite.helper.v2.plist"
 plutil -lint -s "$staging_app/Contents/Info.plist" "$staging_app/Contents/Library/LaunchDaemons/"*.plist
 
 # Pinned NTFS-3G candidates, digests checked before re-signing (see .scratch/write-delete-validation).
@@ -45,17 +46,20 @@ quiet_sign() { codesign --force --timestamp=none --sign "$identity" "$@" 2>/dev/
 # The drivers load macFUSE's libfuse (another team), so they are signed without library validation.
 quiet_sign --identifier com.leolu.ntfslite.ntfs-3g "$staging_app/Contents/Helpers/ntfs-3g"
 quiet_sign --identifier com.leolu.ntfslite.ntfs-3g.probe "$staging_app/Contents/Helpers/ntfs-3g.probe"
-quiet_sign --options runtime --identifier com.leolu.ntfslite.helper "$staging_app/Contents/MacOS/NTFSLiteHelper"
+quiet_sign --options runtime --identifier com.leolu.ntfslite.helper.v2 "$staging_app/Contents/MacOS/NTFSLiteHelper"
 quiet_sign --options runtime "$staging_app"
 
 # Verification: exact file allowlist, strict signatures, identifiers and team.
-expected=$'Contents/Helpers/ntfs-3g\nContents/Helpers/ntfs-3g.probe\nContents/Info.plist\nContents/Library/LaunchDaemons/com.leolu.ntfslite.helper.plist\nContents/MacOS/NTFSLiteHelper\nContents/MacOS/NTFSLiteReadOnlyApp\nContents/_CodeSignature/CodeResources'
+expected=$'Contents/Helpers/ntfs-3g\nContents/Helpers/ntfs-3g.probe\nContents/Info.plist\nContents/Library/LaunchDaemons/com.leolu.ntfslite.helper.v2.plist\nContents/MacOS/NTFSLiteHelper\nContents/MacOS/NTFSLiteReadOnlyApp\nContents/Resources/NTFSLite.icns\nContents/_CodeSignature/CodeResources'
 actual=$(cd "$staging_app" && find . \( -type f -o -type l \) | sed 's|^\./||' | LC_ALL=C sort)
 [[ "$actual" == "$expected" ]] || { print -u2 -r -- "FAIL: App 包文件清单与允许列表不一致。"; exit 1; }
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$staging_app/Contents/Info.plist")" == "NTFSLite.icns" \
+    && "$(sips -g format "$staging_app/Contents/Resources/NTFSLite.icns" 2>/dev/null)" == *$'format: icns'* ]] \
+    || { print -u2 -r -- "FAIL: App 图标声明或资源无效。"; exit 1; }
 codesign --verify --strict --deep "$staging_app"
 typeset -A identifiers=(
     . com.leolu.ntfslite.readonly
-    Contents/MacOS/NTFSLiteHelper com.leolu.ntfslite.helper
+    Contents/MacOS/NTFSLiteHelper com.leolu.ntfslite.helper.v2
     Contents/Helpers/ntfs-3g com.leolu.ntfslite.ntfs-3g
     Contents/Helpers/ntfs-3g.probe com.leolu.ntfslite.ntfs-3g.probe
 )

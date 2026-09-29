@@ -1,9 +1,11 @@
 import Darwin
 import Foundation
+import FSKit
 import NTFSLiteHelperExecution
 import NTFSLiteSystem
 
 enum MountUserOperation: String {
+    case fsKitReady = "fskit-ready"
     case volumeUUID = "volume-uuid"
     case writable
     case unmount
@@ -13,6 +15,8 @@ enum MountUserOperation: String {
 /// one fixed operation on a mount point under /Volumes. FSKit mounts are per user and refuse root.
 enum MountUserAgent {
     static let flag = "--as-mount-user"
+    static let fsKitCheckPlaceholder = "/Volumes/NTFSLite-FSKit-Check"
+    private static let expectedFSKitModule = "io.macfuse.app.fsmodule.macfuse-local"
 
     static func isAcceptedMountPoint(_ path: String) -> Bool {
         path.hasPrefix("/Volumes/") && !path.contains("/../") && !path.hasSuffix("/..")
@@ -22,7 +26,9 @@ enum MountUserAgent {
     static func run(arguments: [String]) -> Int32 {
         guard arguments.count == 4, arguments[1] == flag,
               let operation = MountUserOperation(rawValue: arguments[2]),
-              isAcceptedMountPoint(arguments[3])
+              (operation == .fsKitReady
+                  ? arguments[3] == fsKitCheckPlaceholder
+                  : isAcceptedMountPoint(arguments[3]))
         else { return 64 }
         var groups: [gid_t] = [WritableMountExecutor.mountGID]
         guard setgroups(1, &groups) == 0, setgid(WritableMountExecutor.mountGID) == 0,
@@ -33,6 +39,14 @@ enum MountUserAgent {
         else { return 70 }
         let mountPoint = arguments[3]
         switch operation {
+        case .fsKitReady:
+            let selected = BoundedMainRunLoopWait.wait(timeout: 3) { finish in
+                FSClient.shared.fetchInstalledExtensions { modules, error in
+                    let matching = modules?.filter { $0.bundleIdentifier == expectedFSKitModule } ?? []
+                    finish(error == nil && matching.count == 1 && matching[0].isEnabled)
+                }
+            }
+            return selected == true ? 0 : 1
         case .volumeUUID:
             guard let entry = LiveWritableMountSystem.statfsEntry(mountPoint: mountPoint),
                   let uuid = MountedFileSystemUUIDReader.read(for: entry)

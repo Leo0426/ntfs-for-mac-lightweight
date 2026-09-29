@@ -10,6 +10,10 @@ public struct ReadOnlyVolumeEvidence: Equatable, Sendable {
     public let isInternal: Bool?
     public let roleEvidence: VolumeRoleEvidence
     public let diskArbitrationMountPoint: String?
+    public let mediaUUID: String?
+    public let mediaContent: String?
+    public let mediaContentHint: String?
+    public let mediaRegistryID: UInt64?
 
     public init(
         bsdName: String?,
@@ -19,7 +23,11 @@ public struct ReadOnlyVolumeEvidence: Equatable, Sendable {
         fileSystemName: String?,
         isInternal: Bool?,
         roleEvidence: VolumeRoleEvidence,
-        diskArbitrationMountPoint: String?
+        diskArbitrationMountPoint: String?,
+        mediaUUID: String? = nil,
+        mediaContent: String? = nil,
+        mediaContentHint: String? = nil,
+        mediaRegistryID: UInt64? = nil
     ) {
         self.bsdName = bsdName
         self.volumeUUID = volumeUUID
@@ -29,6 +37,10 @@ public struct ReadOnlyVolumeEvidence: Equatable, Sendable {
         self.isInternal = isInternal
         self.roleEvidence = roleEvidence
         self.diskArbitrationMountPoint = diskArbitrationMountPoint
+        self.mediaUUID = mediaUUID
+        self.mediaContent = mediaContent
+        self.mediaContentHint = mediaContentHint
+        self.mediaRegistryID = mediaRegistryID
     }
 }
 

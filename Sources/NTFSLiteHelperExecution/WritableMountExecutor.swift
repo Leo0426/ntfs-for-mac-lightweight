@@ -15,11 +15,14 @@ public struct HelperVolumeFacts: Equatable, Sendable {
     public var isWritableMount: Bool?
     public var volumeUUID: String?
     public var volumeName: String?
+    public var mediaUUID: String?
+    public var mediaContent: String?
 
     public init(
         bsdName: String?, wholeDiskBSDName: String?, isWholeDisk: Bool?, isInternal: Bool?,
         isRemovable: Bool?, isEjectable: Bool?, deviceProtocol: String?, fileSystemName: String?,
-        mountPoint: String?, isWritableMount: Bool?, volumeUUID: String?, volumeName: String? = nil
+        mountPoint: String?, isWritableMount: Bool?, volumeUUID: String?, volumeName: String? = nil,
+        mediaUUID: String? = nil, mediaContent: String? = nil
     ) {
         self.bsdName = bsdName
         self.wholeDiskBSDName = wholeDiskBSDName
@@ -33,6 +36,8 @@ public struct HelperVolumeFacts: Equatable, Sendable {
         self.isWritableMount = isWritableMount
         self.volumeUUID = volumeUUID
         self.volumeName = volumeName
+        self.mediaUUID = mediaUUID
+        self.mediaContent = mediaContent
     }
 }
 
@@ -61,16 +66,18 @@ public struct HelperDriverState: Equatable, Sendable {
 }
 
 /// Primitive system operations the privileged helper implements; every answer is fresh.
-public protocol WritableMountSystem: Sendable {
-    func volumeFacts(bsdName: String) async -> HelperVolumeFacts?
+public protocol WritableMountSystem: HelperMediaTopologyReading {
     func readBootSector(partitionBSDName: String) async -> Data?
+    /// Fresh positive proof that the selected FSKit module and bundled driver
+    /// are available to the fixed mount user. Nil is unverified.
+    func fsKitRuntimeReady() async -> Bool?
     /// Standard (never forced) unmount of the native read-only mount.
-    func unmountNative(bsdName: String) async -> Bool
+    func unmountNative(bsdName: String, expectedRegistryEntryID: UInt64) async -> Bool
     /// No-recovery health probe; nil means unknown.
     func healthIsClean(bsdName: String) async -> Bool?
     func pathExists(_ path: String) async -> Bool
     /// Starts the pinned driver in its own session; returns its pid.
-    func startDriver(bsdName: String, mountPoint: String) async -> Int32?
+    func startDriver(bsdName: String, expectedRegistryEntryID: UInt64, mountPoint: String) async -> Int32?
     func mountEntry(at mountPoint: String) async -> HelperMountEntry?
     func isFSKitPlaceholder(source: String) async -> Bool
     func driverState(pid: Int32) async -> HelperDriverState
@@ -96,6 +103,7 @@ public enum WritableMountFailure: Int32, Sendable {
     case mountNotVerified = 12
     case factsUnavailable = 13
     case volumeUUIDMismatch = 14
+    case fsKitUnavailable = 15
 }
 
 public enum WritableMountExecutor {
@@ -122,15 +130,53 @@ public enum WritableMountExecutor {
         guard let boot = await system.readBootSector(partitionBSDName: bsd), isNTFSBootSector(boot)
         else { return refused(.bootSectorInvalid) }
 
-        guard await system.unmountNative(bsdName: bsd) else { return refused(.nativeUnmountFailed) }
+        switch await HelperTopologyVerifier.verify(target.disk, selectedVolumeBSDName: bsd, system: system) {
+        case .success:
+            break
+        case let .failure(failure):
+            return refused(topologyFailure(failure))
+        }
+
+        guard let expectedEntryID = target.disk.partitions.first(where: { $0.bsdName == bsd })?.registryEntryID else {
+            return refused(.targetMismatch)
+        }
+        // A missing or disabled FSKit module must not cost the user their
+        // existing native read-only mount. This check is per request, not a
+        // Gate 1–3 completion requirement.
+        guard await system.fsKitRuntimeReady() == true else { return refused(.fsKitUnavailable) }
+        guard case .success = await HelperTopologyVerifier.verify(
+            target.disk, selectedVolumeBSDName: bsd, system: system
+        ) else { return refused(.targetMismatch) }
+        guard await system.unmountNative(bsdName: bsd, expectedRegistryEntryID: expectedEntryID) else {
+            return changed(.nativeUnmountFailed)
+        }
 
         // After the native unmount: the volume state has changed; the app must re-read facts.
         guard let unmounted = await system.volumeFacts(bsdName: bsd),
               unmounted.wholeDiskBSDName == target.disk.physicalDiskBSDName,
               unmounted.mountPoint == nil || unmounted.mountPoint == ""
         else { return changed(.nativeUnmountFailed) }
+        guard case .success = await HelperTopologyVerifier.verify(
+            target.disk, selectedVolumeBSDName: bsd, system: system
+        ) else { return changed(.targetMismatch) }
         guard await system.readBootSector(partitionBSDName: bsd) == boot else { return changed(.bootSectorChanged) }
         guard await system.healthIsClean(bsdName: bsd) == true else { return changed(.healthNotClean) }
+
+        // The no-recovery probe may take up to a minute. Bind the same media
+        // and boot bytes again immediately before the driver is started.
+        switch await HelperTopologyVerifier.verify(target.disk, selectedVolumeBSDName: bsd, system: system) {
+        case .failure:
+            return changed(.targetMismatch)
+        case let .success(partitions):
+            guard let selected = partitions.first(where: { $0.bsdName == bsd }),
+                  selected.facts.mountPoint == nil, selected.ownedMounts.isEmpty
+            else { return changed(.targetMismatch) }
+            if let freshUUID = selected.facts.volumeUUID,
+               freshUUID.caseInsensitiveCompare(target.volumeUUID) != .orderedSame {
+                return changed(.volumeUUIDMismatch)
+            }
+        }
+        guard await system.readBootSector(partitionBSDName: bsd) == boot else { return changed(.bootSectorChanged) }
 
         // Under FSKit, Finder names the volume after its mount point: keep the familiar label.
         var root: String?
@@ -140,7 +186,9 @@ public enum WritableMountExecutor {
             break
         }
         guard let root else { return changed(.driverStartFailed) }
-        guard let pid = await system.startDriver(bsdName: bsd, mountPoint: root) else {
+        guard let pid = await system.startDriver(
+            bsdName: bsd, expectedRegistryEntryID: expectedEntryID, mountPoint: root
+        ) else {
             return changed(.driverStartFailed)
         }
         var entry: HelperMountEntry?
@@ -160,6 +208,14 @@ public enum WritableMountExecutor {
               await system.driverHolds(pid: pid, devicePath: "/dev/" + bsd),
               await system.isWritable(mountPoint: root)
         else { return changed(.mountNotVerified) }
+        switch await HelperTopologyVerifier.verify(target.disk, selectedVolumeBSDName: bsd, system: system) {
+        case .failure:
+            return changed(.targetMismatch)
+        case let .success(partitions):
+            guard let selected = partitions.first(where: { $0.bsdName == bsd }),
+                  selected.ownedMounts == [HelperOwnedMount(mountPoint: root, driverPID: pid)]
+            else { return changed(.mountNotVerified) }
+        }
         return HelperResponseEnvelope(resultCode: .succeeded, exitStatus: 0)
     }
 
@@ -176,6 +232,17 @@ public enum WritableMountExecutor {
         let bytes = [UInt8](boot)
         return bytes.count == 512 && Array(bytes[3..<11]) == Array("NTFS    ".utf8)
             && bytes[510] == 0x55 && bytes[511] == 0xAA && bytes[72..<80].contains { $0 != 0 }
+    }
+
+    private static func topologyFailure(_ failure: HelperTopologyFailure) -> WritableMountFailure {
+        switch failure {
+        case .factsUnavailable:
+            .factsUnavailable
+        case .notExternalRemovable:
+            .notExternalRemovable
+        case .targetMismatch, .ambiguousMount, .siblingMounted:
+            .targetMismatch
+        }
     }
 
     private static func refused(_ failure: WritableMountFailure) -> HelperResponseEnvelope {
