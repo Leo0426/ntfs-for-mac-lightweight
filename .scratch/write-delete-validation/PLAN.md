@@ -412,7 +412,7 @@ FSKit/PluginKit 状态问题，但该历史说明不能证明本机的具体原�
 - `usb-run-iy83tfl1/`：原生卸载、可写挂载、`cleanupVerified` 通过，进入 4 GiB 数据集阶段后，
   启动终端标签页消失。驱动日志无 `Unmounting`，驱动进程已不存在；监督进程（ruid 0 /
   euid 501）与后续 `/sbin/mount` 查询均处于 `U` 状态，挂载表查询挂起。推测终端挂断信号
-  经 sudo 传给同进程组的驱动；标签页关闭原因未确认。U 盘 NTFS 可能未正常卸载。
+  经 sudo 传给同进程组的驱动；用户确认为误点关闭该标签页。U 盘 NTFS 可能未正常卸载。
 - 按规则不强制卸载或强杀；待用户正常重启清理现场，再核对挂载、进程与 U 盘健康。
 - 修正：驱动 `start_new_session=True`；`--run` 忽略 SIGHUP；终端输出失败不再中断运行，
   journal 仍为记录。3 项新增回归先红后绿，83 项实验测试通过；完整 `scripts/check.sh`
