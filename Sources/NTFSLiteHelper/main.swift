@@ -31,9 +31,39 @@ let processor = HelperRequestProcessor { request in
     }
 }
 
+/// launchd starts the helper on demand; it exits when idle so no root process lingers and an
+/// updated app binary takes effect. Drivers it started are reparented to launchd, and mounts are
+/// recognized from process and mount facts, not from helper memory.
+final class IdleExit: @unchecked Sendable {
+    static let shared = IdleExit()
+    private let lock = NSLock()
+    private var inFlight = 0
+    private var lastActivity = Date()
+
+    func begin() { lock.withLock { inFlight += 1; lastActivity = Date() } }
+    func end() { lock.withLock { inFlight -= 1; lastActivity = Date() } }
+
+    func start(idleSeconds: TimeInterval) {
+        let timer = DispatchSource.makeTimerSource(queue: .global())
+        timer.schedule(deadline: .now() + 30, repeating: 30)
+        timer.setEventHandler { [self] in
+            let idle = lock.withLock { inFlight == 0 && Date().timeIntervalSince(lastActivity) > idleSeconds }
+            if idle { exit(0) }
+        }
+        timer.resume()
+        self.timer = timer
+    }
+
+    private var timer: DispatchSourceTimer?
+}
+
 final class HelperService: NSObject, NTFSLiteHelperXPC {
     func submit(_ request: Data, withReply reply: @escaping @Sendable (Data) -> Void) {
-        Task { reply(await processor.respond(to: request)) }
+        IdleExit.shared.begin()
+        Task {
+            reply(await processor.respond(to: request))
+            IdleExit.shared.end()
+        }
     }
 }
 
@@ -51,4 +81,5 @@ listener.setConnectionCodeSigningRequirement(HelperServiceIdentity.clientRequire
 let delegate = ListenerDelegate()
 listener.delegate = delegate
 listener.resume()
+IdleExit.shared.start(idleSeconds: 120)
 dispatchMain()

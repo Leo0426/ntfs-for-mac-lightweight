@@ -25,6 +25,8 @@ public protocol DiskReleaseSystem: Sendable {
     func unmountNativeVolume(bsdName: String) async -> Bool
     func eject(diskBSDName: String) async -> Bool
     func diskIsPresent(bsdName: String) async -> Bool
+    /// Our driver's mounts whose partition device on `diskBSDName` no longer exists.
+    func orphanedMounts(diskBSDName: String) async -> [HelperOwnedMount]?
     func pause() async
 }
 
@@ -54,6 +56,7 @@ public enum DiskReleaseExecutor {
     }
 
     public static func unmountDisk(target: HelperDiskInstanceIdentity, system: DiskReleaseSystem) async -> HelperResponseEnvelope {
+        if let removed = await releaseOrphans(ofRemoved: target, system: system) { return removed }
         switch await verifiedPartitions(of: target, system: system) {
         case let .failure(failure):
             return failure.response
@@ -66,6 +69,12 @@ public enum DiskReleaseExecutor {
     }
 
     public static func ejectDisk(target: HelperDiskInstanceIdentity, system: DiskReleaseSystem) async -> HelperResponseEnvelope {
+        if await system.volumeFacts(bsdName: target.physicalDiskBSDName) == nil,
+           await !system.diskIsPresent(bsdName: target.physicalDiskBSDName) {
+            // Already removed: done only once none of our mounts for it remain.
+            guard let orphans = await system.orphanedMounts(diskBSDName: target.physicalDiskBSDName) else { return failed(.factsUnavailable) }
+            return orphans.isEmpty ? succeeded : failed(.stillMounted)
+        }
         switch await verifiedPartitions(of: target, system: system) {
         case let .failure(failure):
             return failure.response
@@ -82,6 +91,20 @@ public enum DiskReleaseExecutor {
             }
             return changed(.ejectNotConfirmed)
         }
+    }
+
+    /// A disk pulled out while writable leaves our driver serving a dead device. Returns nil when
+    /// the disk is present (normal path applies).
+    private static func releaseOrphans(ofRemoved target: HelperDiskInstanceIdentity, system: DiskReleaseSystem) async -> HelperResponseEnvelope? {
+        let disk = target.physicalDiskBSDName
+        guard await system.volumeFacts(bsdName: disk) == nil, await !system.diskIsPresent(bsdName: disk) else { return nil }
+        guard let orphans = await system.orphanedMounts(diskBSDName: disk) else { return failed(.factsUnavailable) }
+        for mount in orphans {
+            guard await system.unmountFileSystem(mountPoint: mount.mountPoint) else { return failed(.unmountRefused) }
+            guard await system.waitForDriverExit(pid: mount.driverPID) else { return changed(.driverNotExited) }
+            guard await system.removeEmptyMountPoint(mount.mountPoint) else { return changed(.mountPointNotRemoved) }
+        }
+        return succeeded
     }
 
     /// Releases one partition; nil means it is no longer mounted.

@@ -122,7 +122,7 @@ private extension WriteRefusal {
 public enum WriteOutcomeText {
     public static func text(_ outcome: WriteOutcome) -> String {
         switch outcome {
-        case .writingEnabled: return "已启用写入。可以在 Finder 中读写此卷；用完请点“安全推出”。"
+        case .writingEnabled: return "已启用写入。可以在 Finder 侧栏中以原卷名读写此卷；用完请点“安全推出”，拔盘前不要直接拔出。"
         case .ejected: return "已安全推出，可以拔出磁盘。"
         case let .refused(refusal): return "未进行任何更改：" + reason(refusal)
         case let .needsRefresh(refusal): return reason(refusal) + " 磁盘状态可能已变化，已重新读取；如仍异常请重新插拔后再试。"

@@ -69,7 +69,8 @@ final class LiveWritableMountSystem: WritableMountSystem, @unchecked Sendable {
             fileSystemName: description[kDADiskDescriptionVolumeKindKey as String] as? String,
             mountPoint: mountPoint,
             isWritableMount: writable,
-            volumeUUID: uuid
+            volumeUUID: uuid,
+            volumeName: description[kDADiskDescriptionVolumeNameKey as String] as? String
         )
     }
 
@@ -121,8 +122,10 @@ final class LiveWritableMountSystem: WritableMountSystem, @unchecked Sendable {
         }
     }
 
-    func freshMountPoint() -> String {
-        "/Volumes/NTFSLite-" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+    func pathExists(_ path: String) async -> Bool {
+        var info = stat()
+        // Anything other than a definite "does not exist" counts as occupied.
+        return lstat(path, &info) == 0 || errno != ENOENT
     }
 
     func startDriver(bsdName bsd: String, mountPoint: String) async -> Int32? {
@@ -364,7 +367,7 @@ extension LiveWritableMountSystem: DiskReleaseSystem {
     }
 
     func removeEmptyMountPoint(_ path: String) async -> Bool {
-        guard path.hasPrefix("/Volumes/NTFSLite-") else { return false }
+        guard MountUserAgent.isAcceptedMountPoint(path) else { return false }
         var info = stat()
         if lstat(path, &info) != 0 { return errno == ENOENT }
         return info.st_mode & S_IFMT == S_IFDIR && rmdir(path) == 0
@@ -383,6 +386,32 @@ extension LiveWritableMountSystem: DiskReleaseSystem {
                 box.continuation.resume(returning: dissenter == nil)
             }, box.toOpaque())
         }
+    }
+
+    func orphanedMounts(diskBSDName disk: String) async -> [HelperOwnedMount]? {
+        guard disk.range(of: #"^disk[0-9]+$"#, options: .regularExpression) != nil else { return nil }
+        let driverPath = helpersDirectory.appendingPathComponent("ntfs-3g").resolvingSymlinksInPath().path
+        let capacity = proc_listallpids(nil, 0)
+        guard capacity > 0 else { return nil }
+        var pids = [pid_t](repeating: 0, count: Int(capacity) + 64)
+        let count = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.stride))
+        guard count > 0 else { return nil }
+        var orphans: [HelperOwnedMount] = []
+        for pid in pids.prefix(Int(count)) where pid > 0 {
+            var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+            guard proc_pidpath(pid, &path, UInt32(path.count)) > 0,
+                  String(decoding: path.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self) == driverPath,
+                  let arguments = Self.arguments(of: pid), arguments.count == 5,
+                  arguments[1].range(of: "^/dev/\(disk)s[0-9]+$", options: .regularExpression) != nil,
+                  arguments[3] == "-o", arguments[4] == Self.driverOptions
+            else { continue }
+            var info = stat()
+            guard lstat(arguments[1], &info) != 0, errno == ENOENT,
+                  let entry = await mountEntry(at: arguments[2]), entry.flags.isSuperset(of: ["macfuse", "fskit"])
+            else { continue }
+            orphans.append(HelperOwnedMount(mountPoint: arguments[2], driverPID: pid))
+        }
+        return orphans
     }
 
     func diskIsPresent(bsdName: String) async -> Bool {
