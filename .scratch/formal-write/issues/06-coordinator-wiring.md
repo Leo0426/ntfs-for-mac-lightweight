@@ -1,4 +1,4 @@
-# 协调器与数据卷声明接线
+# 写入会话接线（ADR 0011）
 
 Status: ready-for-agent
 Labels: enhancement, ready-for-agent
@@ -7,11 +7,11 @@ Blocked-by: 05
 
 ## 范围
 
-ReadOnlyAppStore 的观察结果 → fresh 候选 + 一次性数据卷声明 → `VolumeCoordinator.rebuildInventory`
-→ `requestEnableWriting` / `requestEject` → `executeMutation` 经 helper executor → 结果后重新读取
-系统事实更新状态。声明在重插、重订阅、拓扑变化、消费后失效。
+按 ADR 0011：`NTFSLiteWriteSession` 轻量写入会话（每盘互斥、显式确认、一次性 operation ID、
+固定动作、超时/断线视为状态未知不重发），App Store 在操作结束后重新观察系统。Core
+`VolumeCoordinator` 多步工作流暂不接入。
 
 ## 验收
 
-- 行为检查：声明缺失/过期/重放拒绝；同盘互斥；执行后必须以新系统事实结算状态。
+- 行为检查：未确认拒绝；同盘互斥；超时/断线为状态未知；结果码映射为固定文字；结束后请求重新观察。
 - App 依赖边界检查通过。

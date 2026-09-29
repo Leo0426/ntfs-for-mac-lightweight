@@ -10,6 +10,7 @@ import NTFSLiteMutationPreparation
 import NTFSLitePresentation
 import NTFSLiteReadOnlyProbing
 import NTFSLiteSystem
+import NTFSLiteWriteSession
 
 let gate1FixtureEvidenceID = "G1-0123456789ABCDEF0123456789ABCDEF"
 
@@ -16542,3 +16543,90 @@ func diskReleaseExecutorUsesOnlyStandardReleaseAndFailsClosed() async {
 
 await diskReleaseExecutorUsesOnlyStandardReleaseAndFailsClosed()
 print("PASS: helper unmount and eject use standard release only, await drivers and confirm removal")
+
+final class FakeHelperTransport: HelperTransport, @unchecked Sendable {
+    var replies: [HelperTransportResult]
+    var actions: [String] = []
+    var operationIDs: [String] = []
+    var gate: CheckedContinuation<Void, Never>?
+    var holdFirst = false
+
+    init(_ replies: [HelperTransportResult]) { self.replies = replies }
+
+    func send(_ request: Data) async -> HelperTransportResult {
+        let object = (try? JSONSerialization.jsonObject(with: request)) as? [String: Any]
+        actions.append(object?["action"] as? String ?? "?")
+        operationIDs.append(object?["operationID"] as? String ?? "?")
+        if holdFirst {
+            holdFirst = false
+            await withCheckedContinuation { gate = $0 }
+        }
+        return replies.isEmpty ? .unavailable : replies.removeFirst()
+    }
+}
+
+func helperReply(_ code: HelperResultCode, _ status: Int32) -> HelperTransportResult {
+    .reply(try! JSONEncoder().encode(HelperResponseEnvelope(resultCode: code, exitStatus: status)))
+}
+
+func writeSessionSendsOnlyConfirmedExclusiveFixedRequests() async {
+    let volume = VolumeInstanceID(
+        volumeID: VolumeID(uuid: "4E6D1FC6-D631-3BD7-AE52-E7FCA880A904", bsdName: "disk6s2"),
+        diskInstanceID: DiskInstanceID(physicalDiskID: PhysicalDiskID(rawValue: "disk6"), mediaGeneration: MediaGeneration(rawValue: 3))
+    )
+
+    let unconfirmed = FakeHelperTransport([helperReply(.succeeded, 0)])
+    let refused = await WriteSession(transport: unconfirmed).enableWriting(volume, confirmedAsDataVolume: false)
+    expect(refused == .refused(.notConfirmed) && unconfirmed.actions.isEmpty,
+           "writing must never be requested without the user's data-volume confirmation")
+
+    let transport = FakeHelperTransport([helperReply(.succeeded, 0), helperReply(.succeeded, 0)])
+    let session = WriteSession(transport: transport)
+    let enabled = await session.enableWriting(volume, confirmedAsDataVolume: true)
+    let writable = await session.writableVolumes()
+    expect(enabled == .writingEnabled && transport.actions == ["mountReadWrite"] && writable == [volume],
+           "a confirmed request sends exactly one fixed mountReadWrite action")
+    _ = await session.enableWriting(volume, confirmedAsDataVolume: true)
+    expect(Set(transport.operationIDs).count == 2, "every request carries a fresh one-shot operation ID")
+
+    let busyTransport = FakeHelperTransport([helperReply(.succeeded, 0), helperReply(.succeeded, 0)])
+    busyTransport.holdFirst = true
+    let busySession = WriteSession(transport: busyTransport)
+    let first = Task { await busySession.enableWriting(volume, confirmedAsDataVolume: true) }
+    while busyTransport.gate == nil { await Task.yield() }
+    let second = await busySession.safeEject(volume.diskInstanceID)
+    busyTransport.gate?.resume()
+    _ = await first.value
+    expect(second == .refused(.diskBusy) && busyTransport.actions == ["mountReadWrite"],
+           "a second operation on the same disk must be refused while one is running")
+
+    for (reply, expected) in [
+        (HelperTransportResult.timedOut, WriteOutcome.needsRefresh(.helperTimedOut)),
+        (.unavailable, .refused(.helperUnavailable)),
+        (.reply(Data("{}".utf8)), .needsRefresh(.invalidResponse)),
+        (helperReply(.executionFailed, WritableMountFailure.healthNotClean.rawValue), .refused(.mount(.healthNotClean))),
+        (helperReply(.postconditionFailed, WritableMountFailure.healthNotClean.rawValue), .needsRefresh(.mount(.healthNotClean))),
+        (helperReply(.rejectedReplayedOperation, 1), .refused(.requestRejected)),
+    ] {
+        let result = await WriteSession(transport: FakeHelperTransport([reply])).enableWriting(volume, confirmedAsDataVolume: true)
+        expect(result == expected, "helper replies must map to fixed outcomes; unknown delivery is never retried")
+    }
+
+    let eject = FakeHelperTransport([helperReply(.succeeded, 0), helperReply(.succeeded, 0)])
+    let ejected = await WriteSession(transport: eject).safeEject(volume.diskInstanceID)
+    expect(ejected == .ejected && eject.actions == ["unmountDisk", "ejectDisk"],
+           "safe eject unmounts the whole disk before requesting eject")
+
+    let busyUnmount = FakeHelperTransport([helperReply(.executionFailed, DiskReleaseFailure.unmountRefused.rawValue)])
+    let busyResult = await WriteSession(transport: busyUnmount).safeEject(volume.diskInstanceID)
+    expect(busyResult == .refused(.release(.unmountRefused)) && busyUnmount.actions == ["unmountDisk"],
+           "a busy volume stops safe eject before any eject request")
+
+    expect(WriteOutcomeText.text(.refused(.mount(.healthNotClean))).contains("Windows")
+           && WriteOutcomeText.text(.ejected).contains("拔出")
+           && WriteOutcomeText.text(.needsRefresh(.helperTimedOut)).contains("重新读取"),
+           "outcomes must be explained in fixed user-facing text")
+}
+
+await writeSessionSendsOnlyConfirmedExclusiveFixedRequests()
+print("PASS: write session requires confirmation, serializes per disk, uses fresh IDs and never retries unknown delivery")

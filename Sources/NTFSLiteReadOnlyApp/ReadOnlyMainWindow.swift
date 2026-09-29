@@ -248,9 +248,9 @@ struct ReadOnlyMainWindow: View {
                     in: store.dashboard
                 ) {
                 case .overview:
-                    ReadOnlyOverview(dashboard: store.dashboard)
+                    ReadOnlyOverview(dashboard: store.dashboard, writeController: store.writeController)
                 case let .volume(volume, disk):
-                    ReadOnlyVolumeDetail(volume: volume, physicalDisk: disk)
+                    ReadOnlyVolumeDetail(volume: volume, physicalDisk: disk, writeController: store.writeController)
                 case .environment:
                     ReadOnlySetupDetail(store: store, setup: store.dashboard.setup)
                 case .diagnostics:
@@ -390,9 +390,11 @@ private struct ReadOnlyDiagnosticsDetail: View {
 
 private struct ReadOnlyOverview: View {
     let dashboard: ReadOnlyDashboardPresentation
+    @ObservedObject var writeController: WriteController
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
+            WritableVolumesSummary(controller: writeController)
             VStack(alignment: .leading, spacing: 8) {
                 Text(dashboard.title)
                     .font(.largeTitle.bold())
@@ -444,6 +446,7 @@ private struct ReadOnlyOverview: View {
 private struct ReadOnlyVolumeDetail: View {
     let volume: ReadOnlyVolumePresentation
     let physicalDisk: ReadOnlyPhysicalDiskPresentation
+    @ObservedObject var writeController: WriteController
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -477,9 +480,7 @@ private struct ReadOnlyVolumeDetail: View {
             }
 
             GroupBox("可执行操作") {
-                Text("当前没有磁盘变更操作。后续只有在真实磁盘、安全后端和权限边界全部通过验证后才会逐步开放。")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .fixedSize(horizontal: false, vertical: true)
+                VolumeWriteActions(controller: writeController, volume: volume)
             }
         }
     }

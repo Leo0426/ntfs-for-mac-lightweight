@@ -92,6 +92,7 @@ let package = Package(
                 "NTFSLitePresentation",
                 "NTFSLiteReadOnlyProbing",
                 "NTFSLiteSystem",
+                "NTFSLiteWriteSession",
             ]
         ),
         .executableTarget(
@@ -103,13 +104,21 @@ let package = Package(
             dependencies: [
                 "NTFSLiteCore",
                 "NTFSLiteDiagnostics",
+                "NTFSLiteHelperProtocol",
                 "NTFSLitePresentation",
                 "NTFSLiteSystem",
-            ]
+                "NTFSLiteWriteSession",
+            ],
+            linkerSettings: [.linkedFramework("ServiceManagement")]
         ),
         .executableTarget(
             name: "NTFSLiteGate1EvidenceTool",
             dependencies: ["NTFSLiteGateEvidence", "NTFSLiteSystem"]
+        ),
+        // ADR 0011: app-side write session over an injected helper transport; no mutation APIs.
+        .target(
+            name: "NTFSLiteWriteSession",
+            dependencies: ["NTFSLiteCore", "NTFSLiteHelperExecution", "NTFSLiteHelperProtocol"]
         ),
         // Pure helper execution decisions over injected system operations; no mutation APIs.
         .target(

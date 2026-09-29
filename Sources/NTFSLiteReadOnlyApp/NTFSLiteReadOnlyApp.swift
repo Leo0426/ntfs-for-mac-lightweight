@@ -23,6 +23,7 @@ final class ReadOnlyAppStore: ObservableObject {
     @Published private(set) var dashboard: ReadOnlyDashboardPresentation
     @Published private(set) var selectionResetEpoch: ReadOnlySelectionResetEpoch
     @Published private(set) var diagnosticsText = "尚无诊断记录。"
+    private(set) lazy var writeController = WriteController { [weak self] in self?.refresh() }
 
     private let diskObserver: ReadOnlyDiskObserver
     private let setupLoader: SystemSetupFactsLoader
