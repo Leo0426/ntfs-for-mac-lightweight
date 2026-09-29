@@ -119,6 +119,26 @@ def verify_fskit_binding(process, node, source):
     require('p' + str(process.pid) in fields and 'n' + node in fields, 'driverNotHoldingTarget')
 
 
+def fresh_mountpoint():
+    root = Path('/Volumes/NTFSLiteUSB-' + uuid.uuid4().hex)
+    require(not os.path.lexists(root), 'mountpointAlreadyExists')
+    return root
+
+
+def remove_stale_mountpoint(root):
+    # macOS 27 FSKit leaves the empty mountpoint after a standard unmount. Remove only
+    # an empty real directory; anything else stays for inspection.
+    try:
+        info = os.lstat(root)
+    except FileNotFoundError:
+        return
+    require(stat.S_ISDIR(info.st_mode), 'staleMountpointNotDirectory')
+    try:
+        os.rmdir(root)
+    except OSError as error:
+        raise TargetError('staleMountpointNotEmpty') from error
+
+
 def private_target():
     path = BASE / '.build/write-validation/approved-usb-target.json'
     require(path.resolve(strict=True) == path, 'targetReceiptLink')
@@ -258,8 +278,7 @@ class USBLab:
         require(Path(self.native_root).resolve(strict=True) == Path(self.native_root), 'nativeMountpointLink')
         self.device_rdev = block_device_info(self.node).st_rdev
         self.boot = self.read_boot()
-        self.root = Path('/Volumes/NTFSLiteUSB-' + uuid.uuid4().hex)
-        require(not os.path.lexists(self.root), 'mountpointAlreadyExists')
+        self.root = fresh_mountpoint()
         parent = BASE / '.build/write-validation'
         require(parent.resolve(strict=True) == parent, 'evidenceParentLink')
         require(parent.stat().st_dev != Path(self.native_root).stat().st_dev, 'evidenceOnTargetVolume')
@@ -367,7 +386,7 @@ class USBLab:
         dependencies()
         driver = candidate()
         self.health()
-        require(not os.path.lexists(self.root), 'mountpointAlreadyExists')
+        self.root = fresh_mountpoint()
         self.guard('unmounted')
         with (self.folder / f'mount-{self.counter:02}.log').open('xb') as log:
             os.fchmod(log.fileno(), 0o600)
@@ -423,6 +442,7 @@ class USBLab:
         self.process = None
         self.mount_device = None
         self.mount_source = None
+        remove_stale_mountpoint(self.root)
         self.health()
         self.journal('unmountVerified')
 

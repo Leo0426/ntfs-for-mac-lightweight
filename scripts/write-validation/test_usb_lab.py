@@ -5,7 +5,10 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-from usb_lab import complete_cycle, wait_for_mutation, USBLab, defer_interrupts, verify_fskit_binding
+import os
+import tempfile
+from usb_lab import (complete_cycle, wait_for_mutation, USBLab, defer_interrupts, verify_fskit_binding,
+                     fresh_mountpoint, remove_stale_mountpoint)
 from usb_target import TargetError
 
 
@@ -58,6 +61,32 @@ class FSKitBindingChecks(unittest.TestCase):
             with self.subTest(held=held):
                 self.held = held
                 with self.assertRaises(TargetError): verify_fskit_binding(self.process, '/dev/disk6s2', '/dev/disk9')
+
+
+class MountpointChecks(unittest.TestCase):
+    # macOS 27 FSKit leaves the empty mountpoint directory after a standard unmount.
+    def test_each_mount_gets_a_new_unused_mountpoint(self):
+        first, second = fresh_mountpoint(), fresh_mountpoint()
+        self.assertNotEqual(first, second)
+        self.assertRegex(str(first), r'^/Volumes/NTFSLiteUSB-[0-9a-f]{32}$')
+        with patch('usb_lab.os.path.lexists', return_value=True), self.assertRaises(TargetError):
+            fresh_mountpoint()
+
+    def test_stale_mountpoint_removal_only_removes_an_empty_directory(self):
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent) / 'mnt'
+            remove_stale_mountpoint(root)
+            root.mkdir()
+            remove_stale_mountpoint(root)
+            self.assertFalse(root.exists())
+            root.mkdir()
+            (root / 'data').write_bytes(b'x')
+            with self.assertRaises(TargetError): remove_stale_mountpoint(root)
+            self.assertTrue((root / 'data').exists())
+            link = Path(parent) / 'link'
+            link.symlink_to(root)
+            with self.assertRaises(TargetError): remove_stale_mountpoint(link)
+            self.assertTrue(link.is_symlink())
 
 
 class USBLabSequenceChecks(unittest.TestCase):

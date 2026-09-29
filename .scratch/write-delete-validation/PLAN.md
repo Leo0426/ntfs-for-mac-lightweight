@@ -396,3 +396,13 @@ FSKit/PluginKit 状态问题，但该历史说明不能证明本机的具体原�
   恢复上游默认的 silent，不启用 permissions，也不带回 `allow_other,nonempty`。镜像上带该
   参数的实际挂载、33 项 prepare/cleanup 与标准卸载通过；1 项新增回归先红后绿；
   `scripts/check.sh` 通过。
+
+## 首轮 USB 写删与 4 GiB 通过，重挂载点复用失败（2026-09-29）
+
+- `usb-run-uv3uqeca/`：`writableMountVerified`、`cleanupVerified`（33 项）、`fileChecksPassed`
+  （34 项，含 4 GiB + 1 字节）与首次 `unmountVerified` 全部通过，约 12 分钟。重挂载前以
+  `mountpointAlreadyExists` 失败：macOS 27 FSKit 标准卸载后保留空挂载点目录，脚本却复用
+  同一路径。数据集保留在已卸载的 U 盘上，驱动已退出，无残留挂载。
+- 修正：每次挂载使用新的随机挂载点；确认卸载与驱动退出后仅以 `rmdir` 移除本轮空挂载点，
+  非目录或非空均失败关闭。2 项新增回归先红后绿，80 项实验测试及 `scripts/check.sh` 通过。
+- `/Volumes` 中此前实验/诊断留下 9 个空目录（均未挂载），普通用户无权删除，不影响新运行。
