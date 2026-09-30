@@ -11,7 +11,7 @@ binary_dir=$(swift build -c release --show-bin-path)
 standalone_checks=$(mktemp -d "${TMPDIR:-/tmp}/ntfslite-standalone-checks.XXXXXX")
 trap 'rm -rf "$standalone_checks"' EXIT
 swiftc -parse-as-library -warnings-as-errors \
-    Sources/NTFSLiteHelper/SecureHelperDeployment.swift \
+    Sources/NTFSLiteProtectedInstall/SecureHelperDeployment.swift \
     Tests/SecureHelperDeploymentChecks/SecureHelperDeploymentChecks.swift \
     -o "$standalone_checks/NTFSLiteSecureHelperDeploymentChecks"
 "$standalone_checks/NTFSLiteSecureHelperDeploymentChecks"

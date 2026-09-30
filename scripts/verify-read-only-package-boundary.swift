@@ -53,6 +53,7 @@ let requiredRoots = [readOnlyApp, gateEvidence, gateEvidenceTool]
 let mutationFreeRoots = [
     gateEvidence, gateEvidenceTool,
     "NTFSLiteCore", "NTFSLiteSystem", "NTFSLitePresentation", "NTFSLiteDiagnostics",
+    "NTFSLiteProtectedInstall",
 ]
 for root in requiredRoots where dependencies[root] == nil {
     FileHandle.standardError.write(

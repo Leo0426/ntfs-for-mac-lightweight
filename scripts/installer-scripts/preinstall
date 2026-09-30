@@ -1,0 +1,5 @@
+#!/bin/zsh
+set -euo pipefail
+
+# Installer passes arguments, but the target is deliberately fixed here.
+exec "${0:A:h}/check-protected-install-target.sh" /

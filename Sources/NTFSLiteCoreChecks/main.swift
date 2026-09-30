@@ -11268,6 +11268,61 @@ func helperEnablementUIRequiresTheExpectedProtectedInstallLocation() {
 helperEnablementUIRequiresTheExpectedProtectedInstallLocation()
 print("PASS: helper enablement UI requires the expected protected install location")
 
+func helperNotFoundCanBeRetriedOnlyByExplicitRegistration() {
+    expect(HelperServiceState.notFound.canAttemptRegistration,
+           "SMAppService notFound must offer an explicit registration attempt")
+    expect(HelperServiceState.notRegistered.canAttemptRegistration,
+           "an ordinary unregistered helper must offer registration")
+    expect(!HelperServiceState.unavailable.canAttemptRegistration
+           && !HelperServiceState.requiresApproval.canAttemptRegistration
+           && !HelperServiceState.checkingConnection.canAttemptRegistration
+           && !HelperServiceState.enabled.canAttemptRegistration
+           && !HelperServiceState.requiresProtectedInstallation.canAttemptRegistration,
+           "unknown, pending, enabled, and untrusted states must not offer registration")
+    expect(HelperServiceState.notFound.text.contains("系统未找到帮助程序服务")
+           && HelperServiceState.notFound.text.contains("当前不提供磁盘操作"),
+           "notFound must describe the system observation without claiming an unregistered service or write readiness")
+}
+
+helperNotFoundCanBeRetriedOnlyByExplicitRegistration()
+print("PASS: helper notFound offers manual registration while remaining closed")
+
+func helperRegistrationErrorsExposeCodesWithoutArbitraryPaths() {
+    let known = HelperRegistrationDiagnostic.suffix(
+        domain: "com.apple.ServiceManagement", code: 5
+    )
+    expect(known.contains("com.apple.ServiceManagement") && known.contains("5"),
+           "a registration failure must expose its diagnostic NSError domain and code")
+    let untrusted = HelperRegistrationDiagnostic.suffix(
+        domain: "/Users/example/private/NTFSLite.app", code: -2
+    )
+    expect(untrusted.contains("unknown") && untrusted.contains("-2")
+           && !untrusted.contains("/Users/example"),
+           "an unexpected NSError domain must not reveal a filesystem path")
+}
+
+helperRegistrationErrorsExposeCodesWithoutArbitraryPaths()
+print("PASS: helper registration errors retain safe domain and code")
+
+func helperHealthReplyMustMatchFreshChallengeExactly() {
+    let challenge = Data((0..<16).map(UInt8.init))
+    let otherChallenge = Data((1...16).map(UInt8.init))
+    let response = HelperHealthCheck.response(for: challenge)
+    expect(response != nil, "a fixed-size health challenge must have one response")
+    expect(HelperHealthCheck.accepts(response ?? Data(), for: challenge),
+           "the live health reply must match the current challenge")
+    expect(!HelperHealthCheck.accepts(response ?? Data(), for: otherChallenge),
+           "a prior health reply must not validate a later connection")
+    expect(!HelperHealthCheck.accepts((response ?? Data()) + Data([0]), for: challenge),
+           "a reply with trailing data must fail closed")
+    expect(HelperHealthCheck.response(for: Data()) == nil
+           && HelperHealthCheck.response(for: challenge + Data([0])) == nil,
+           "malformed challenge lengths must fail closed")
+}
+
+helperHealthReplyMustMatchFreshChallengeExactly()
+print("PASS: helper XPC health reply binds one exact challenge")
+
 func setupReportContradictionsFailClosedAcrossPresentationAndFacts() {
     let report = SystemSetupReport(
         facts: readySetupFacts(),

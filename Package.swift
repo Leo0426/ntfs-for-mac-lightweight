@@ -20,6 +20,10 @@ let package = Package(
             name: "NTFSLiteMutationPreparation",
             targets: ["NTFSLiteMutationPreparation"]
         ),
+        .library(
+            name: "NTFSLiteProtectedInstall",
+            targets: ["NTFSLiteProtectedInstall"]
+        ),
         .executable(name: "NTFSLiteCoreChecks", targets: ["NTFSLiteCoreChecks"]),
         .executable(
             name: "NTFSLiteScenarioPrototype",
@@ -34,6 +38,10 @@ let package = Package(
             targets: ["NTFSLiteGate1EvidenceTool"]
         ),
         .executable(name: "NTFSLiteHelper", targets: ["NTFSLiteHelper"]),
+        .executable(
+            name: "NTFSLiteProtectedInstallVerifier",
+            targets: ["NTFSLiteProtectedInstallVerifier"]
+        ),
         .executable(name: "NTFSLiteHelperTracer", targets: ["NTFSLiteHelperTracer"]),
     ],
     targets: [
@@ -80,6 +88,10 @@ let package = Package(
                 "NTFSLiteSystem",
             ]
         ),
+        .target(
+            name: "NTFSLiteProtectedInstall",
+            linkerSettings: [.linkedFramework("Security")]
+        ),
         .executableTarget(
             name: "NTFSLiteCoreChecks",
             dependencies: [
@@ -105,6 +117,7 @@ let package = Package(
                 "NTFSLiteCore",
                 "NTFSLiteDiagnostics",
                 "NTFSLiteHelperProtocol",
+                "NTFSLiteProtectedInstall",
                 "NTFSLitePresentation",
                 "NTFSLiteSystem",
                 "NTFSLiteWriteSession",
@@ -128,7 +141,14 @@ let package = Package(
         // ADR 0010: privileged launchd daemon; the only target allowed disk mutation APIs.
         .executableTarget(
             name: "NTFSLiteHelper",
-            dependencies: ["NTFSLiteHelperExecution", "NTFSLiteHelperProtocol", "NTFSLiteSystem"]
+            dependencies: [
+                "NTFSLiteHelperExecution", "NTFSLiteHelperProtocol",
+                "NTFSLiteProtectedInstall", "NTFSLiteSystem",
+            ]
+        ),
+        .executableTarget(
+            name: "NTFSLiteProtectedInstallVerifier",
+            dependencies: ["NTFSLiteHelperProtocol", "NTFSLiteProtectedInstall"]
         ),
         // Issue 02 tracer for SMAppService registration and the signed XPC channel.
         .executableTarget(

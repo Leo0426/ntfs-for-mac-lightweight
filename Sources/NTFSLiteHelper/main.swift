@@ -1,6 +1,7 @@
 import Foundation
 import NTFSLiteHelperExecution
 import NTFSLiteHelperProtocol
+import NTFSLiteProtectedInstall
 
 // Privileged launchd daemon registered through SMAppService (ADR 0010). It accepts only the
 // pinned app signature and executes only admitted ADR 0002 requests.
@@ -8,6 +9,7 @@ import NTFSLiteHelperProtocol
 func deploymentIsTrusted(requireRootProcess: Bool) -> Bool {
     SecureHelperDeployment.verifyCurrent(
         requireRootProcess: requireRootProcess,
+        appIdentifier: HelperServiceIdentity.appIdentifier,
         helperIdentifier: HelperServiceIdentity.helperIdentifier,
         driverIdentifier: LiveWritableMountSystem.driverIdentifier,
         probeIdentifier: LiveWritableMountSystem.probeIdentifier,
@@ -80,6 +82,15 @@ final class IdleExit: @unchecked Sendable {
 }
 
 final class HelperService: NSObject, NTFSLiteHelperXPC {
+    func healthCheck(_ challenge: Data, withReply reply: @escaping @Sendable (Data) -> Void) {
+        guard IdleExit.shared.begin() else { reply(Data()); return }
+        defer { IdleExit.shared.end() }
+        guard deploymentIsTrusted(requireRootProcess: true),
+              let response = HelperHealthCheck.response(for: challenge)
+        else { reply(Data()); return }
+        reply(response)
+    }
+
     func submit(_ request: Data, withReply reply: @escaping @Sendable (Data) -> Void) {
         guard IdleExit.shared.begin() else {
             reply((try? JSONEncoder().encode(HelperResponseEnvelope(

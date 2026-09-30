@@ -23,8 +23,26 @@ public enum HelperServiceIdentity {
     }
 }
 
-/// The single XPC entry point: raw request bytes in, raw response bytes out.
+/// A read-only challenge proves that the approved, signed helper is reachable.
+/// It does not inspect a disk or imply that any disk is safe to change.
+public enum HelperHealthCheck {
+    public static let challengeByteCount = 16
+    private static let prefix = Data("NTFSLite:helper:v2:".utf8)
+
+    public static func response(for challenge: Data) -> Data? {
+        guard challenge.count == challengeByteCount else { return nil }
+        return prefix + challenge
+    }
+
+    public static func accepts(_ reply: Data, for challenge: Data) -> Bool {
+        guard let expected = response(for: challenge) else { return false }
+        return reply == expected
+    }
+}
+
+/// The health entry point is read-only; only submit can reach disk actions.
 @objc public protocol NTFSLiteHelperXPC {
+    func healthCheck(_ challenge: Data, withReply reply: @escaping @Sendable (Data) -> Void)
     func submit(_ request: Data, withReply reply: @escaping @Sendable (Data) -> Void)
 }
 
