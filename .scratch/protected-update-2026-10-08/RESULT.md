@@ -1,6 +1,6 @@
 # 受保护更新到 0.1.5（6）
 
-日期：2026-10-08（Asia/Shanghai）。状态：已安装；v2 已注册但 helper 无法启动，阻塞。
+日期：2026-10-08（Asia/Shanghai）。状态：已安装；v2 已注册但 helper 无法启动，重启后未恢复，阻塞。
 
 ## 已完成
 
@@ -44,3 +44,20 @@
 推断（未证实）：BTM 记录原先关联的 App 容器随旧包移入回退目录而失效，复用记录时没有重建到新包的关联。
 2026-09-30 更新到 0.1.3 时同类流程成功，差异未查明。App 没有注销入口；不使用 `sfltool resetbtm`（全局重置所有
 登录项批准）。下一步：退出 App 停止重试，重启让 BTM 重新解析，再在运行环境页重新检查。
+
+## 重启后只读复核
+
+14:05:28 重启。App、helper 未运行；`launchctl print system/com.leolu.ntfslite.helper.v2` 与 v1 均为
+`Could not find service`，launchd disabled 表中两者为 enabled。启动后 BTM 仍查询 `4A742151…`，14:18 对 v1、v2
+报 `no container item`，launchd 中查无该 job。重启没有修复。
+
+`sfltool dumpbtm`（只读）显示：v1（`CC78F5AC…`，disabled）与 v2（`4A742151…`，enabled）记录在 UID -2 分区，
+`Parent Identifier` 为 `2.com.leolu.ntfslite.readonly`，但 UID -2 分区内没有这个容器记录。对照组 Surge、UU远程、
+macFUSE 的 daemon，其容器都在同一分区并带 `Embedded Item Identifiers`。同一标识符的容器只出现在：
+UID 0，指向 `.build/NTFSLiteHelperTracer.app`（2026-09-29 tracer 实验遗留）；UID 501，指向受保护路径，
+没有内嵌项。由此可确认 launchd `copy_bundle_path` 失败的直接原因：daemon 记录找不到所属容器，所以无法解析
+`BundleProgram`。容器为何在升级后丢失仍未查明。
+
+可选修复都会改变 BTM 状态，须用户决定：由受保护 App 自身调用 `SMAppService.unregister()` 后再 `register()`
+（目前 App 没有该入口，需要新增并重新发布）；或在系统设置“登录项与扩展”中关闭再开启该后台项（未验证能否重建
+容器）。不使用 `sfltool resetbtm`；不用 `.build/` tracer 注销，它会在用户可写副本上再造一条容器记录。
