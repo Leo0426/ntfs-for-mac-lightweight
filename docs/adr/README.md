@@ -15,6 +15,9 @@
 - [0009 — 把已授权的 macOS 写入实验与正式应用分开](0009-isolate-local-write-validation.md)
 - [0010 — 在正式应用中接入可写挂载与安全推出](0010-enable-writable-mount-in-formal-app.md)
 - [0011 — 由 helper 原子执行启用写入，App 以轻量写入会话接线](0011-atomic-helper-enable-writing.md)
+- [0012 — 首次安装使用受保护 pkg，并以实时 XPC 核验 helper](0012-protected-local-install-and-live-helper-check.md)
+
+- [0013 — 每次启用写入前，由正式 helper 验证一次性镜像](0013-verify-runtime-with-disposable-image.md)
 
 后续若引入真实 XPC、helper 安装、提权、应用签名/公证或磁盘执行器，应先判断是否形成新的
 难以逆转边界；满足 ADR 条件时按顺序新增下一个编号的 ADR，不得用修改本索引代替决策记录。

@@ -55,16 +55,24 @@ final class ReadOnlyAppStore: ObservableObject {
     @Published private(set) var dashboard: ReadOnlyDashboardPresentation
     @Published private(set) var selectionResetEpoch: ReadOnlySelectionResetEpoch
     @Published private(set) var diagnosticsText = "尚无诊断记录。"
-    private(set) lazy var writeController = WriteController(
-        refreshObservation: { [weak self] in self?.refresh() },
-        canRequestWriting: { [weak self] id in
-            self?.dashboard.volumes.first(where: { $0.id == id })?.actions.canEnableWriting == true
-        },
-        canRequestEject: { [weak self] id in
-            self?.dashboard.physicalDisks.first(where: { $0.id == id })?
-                .volumes.contains(where: { $0.actions.canSafeEject }) == true
+    private(set) lazy var writeController: WriteController = {
+        let controller = WriteController(
+            refreshObservation: { [weak self] in self?.refresh() },
+            canRequestWriting: { [weak self] id in
+                self?.dashboard.volumes.first(where: { $0.id == id })?.actions.canEnableWriting == true
+            },
+            canRequestEject: { [weak self] id in
+                self?.dashboard.physicalDisks.first(where: { $0.id == id })?
+                    .volumes.contains(where: { $0.actions.canSafeEject }) == true
+            }
+        )
+        // Setup observes this store. Forward child changes so async helper results
+        // redraw that page immediately, without requiring a dashboard refresh or navigation.
+        writeControllerObservation = controller.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
         }
-    )
+        return controller
+    }()
 
     private let diskObserver: ReadOnlyDiskObserver
     private let setupLoader: SystemSetupFactsLoader
@@ -79,6 +87,7 @@ final class ReadOnlyAppStore: ObservableObject {
     private var setupTask: Task<Void, Never>?
     private var diagnosticsDisplayRevision = UUID()
     private var hasStarted = false
+    private var writeControllerObservation: AnyCancellable?
 
     init(
         diskObserver: ReadOnlyDiskObserver = ReadOnlyDiskObserver(),

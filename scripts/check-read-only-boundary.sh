@@ -81,6 +81,11 @@ assert_package_boundary_rejects \
     '{"targets":[{"name":"NTFSLiteReadOnlyApp","target_dependencies":[]},{"name":"NTFSLitePresentation","target_dependencies":[]},{"name":"NTFSLiteGateEvidence","target_dependencies":[]},{"name":"NTFSLiteGate1EvidenceTool","target_dependencies":["NTFSLiteGateEvidence"]},{"name":"NTFSLiteCore","target_dependencies":[]},{"name":"NTFSLiteSystem","target_dependencies":["SystemBridge"]},{"name":"SystemBridge","target_dependencies":["NTFSLiteHelperProtocol"]},{"name":"NTFSLiteDiagnostics","target_dependencies":[]},{"name":"NTFSLiteHelperProtocol","target_dependencies":[]}]}' \
     "NTFSLiteSystem 依赖进入变更边界"
 
+assert_package_boundary_rejects \
+    "受保护安装核验进入 helper" \
+    '{"targets":[{"name":"NTFSLiteReadOnlyApp","target_dependencies":[]},{"name":"NTFSLiteGateEvidence","target_dependencies":[]},{"name":"NTFSLiteGate1EvidenceTool","target_dependencies":["NTFSLiteGateEvidence"]},{"name":"NTFSLiteProtectedInstall","target_dependencies":["NTFSLiteHelperProtocol"]},{"name":"NTFSLiteHelperProtocol","target_dependencies":[]}]}' \
+    "NTFSLiteProtectedInstall 依赖进入变更边界"
+
 assert_package_boundary_accepts() {
     local fixture_name=$1
     local package_json=$2

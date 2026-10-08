@@ -324,7 +324,8 @@ public enum WriteOutcomeText {
         case .bootSectorInvalid, .bootSectorChanged: return "无法确认 NTFS 启动扇区，已停止。"
         case .nativeUnmountFailed: return "无法卸载系统只读挂载，可能有程序正在使用该卷。"
         case .healthNotClean: return "卷未正常关闭或处于休眠状态。请在 Windows 中完全关机（关闭快速启动）或运行磁盘检查后再试。"
-        case .fsKitUnavailable: return "未确认 FSKit 文件系统扩展已启用。请在“运行环境”中检查后重新读取。"
+        case .fsKitUnavailable: return "文件系统写入预检未通过。目标卷保持原状态，请在“运行环境”中检查依赖与扩展。"
+        case .fsKitProbeUnresolved: return "写入预检的收尾尚未确认，已暂停后续操作。请保留当前状态，在“运行环境”中检查；不要重复启用写入。"
         case .driverStartFailed: return "无法启动 NTFS 驱动，请检查 macFUSE 是否已安装并启用。"
         case .mountNotObserved, .mountNotVerified: return "可写挂载未能通过核验，未报告为可写。"
         }

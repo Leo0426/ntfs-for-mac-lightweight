@@ -1,0 +1,8 @@
+{
+  "bytes": 134217728,
+  "sha256": "0fa5b73d5f603c9b7c25a9a67f2e003a2cca7cc4c18cbf3e664e76fbe2caff31",
+  "compressedBytes": 252203,
+  "compressedSHA256": "bc13f484e9bc508733246b1bc2145068041b883a5eaad32273106d54c09d7c34",
+  "mkntfsSHA256": "7790efde233476963eae4509581be220cbb1de991eb6bec3a1a2ab4824aec929",
+  "compression": "raw DEFLATE (Foundation NSData zlib)"
+}

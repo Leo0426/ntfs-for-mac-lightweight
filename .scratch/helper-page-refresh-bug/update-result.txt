@@ -1,0 +1,7 @@
+BACKUP=/private/var/tmp/ntfslite-maintenance-4acofs9w/previous-NTFSLite.app
+installer: Package name is package
+installer: Upgrading at base path /
+installer: The upgrade was successful.
+
+PASS: protected App 0.1.3 (4) installed; signatures, permissions, every file digest and idle service state verified.
+BACKUP=/private/var/tmp/ntfslite-maintenance-4acofs9w/previous-NTFSLite.app

@@ -11268,6 +11268,61 @@ func helperEnablementUIRequiresTheExpectedProtectedInstallLocation() {
 helperEnablementUIRequiresTheExpectedProtectedInstallLocation()
 print("PASS: helper enablement UI requires the expected protected install location")
 
+func helperNotFoundCanBeRetriedOnlyByExplicitRegistration() {
+    expect(HelperServiceState.notFound.canAttemptRegistration,
+           "SMAppService notFound must offer an explicit registration attempt")
+    expect(HelperServiceState.notRegistered.canAttemptRegistration,
+           "an ordinary unregistered helper must offer registration")
+    expect(!HelperServiceState.unavailable.canAttemptRegistration
+           && !HelperServiceState.requiresApproval.canAttemptRegistration
+           && !HelperServiceState.checkingConnection.canAttemptRegistration
+           && !HelperServiceState.enabled.canAttemptRegistration
+           && !HelperServiceState.requiresProtectedInstallation.canAttemptRegistration,
+           "unknown, pending, enabled, and untrusted states must not offer registration")
+    expect(HelperServiceState.notFound.text.contains("系统未找到帮助程序服务")
+           && HelperServiceState.notFound.text.contains("当前不提供磁盘操作"),
+           "notFound must describe the system observation without claiming an unregistered service or write readiness")
+}
+
+helperNotFoundCanBeRetriedOnlyByExplicitRegistration()
+print("PASS: helper notFound offers manual registration while remaining closed")
+
+func helperRegistrationErrorsExposeCodesWithoutArbitraryPaths() {
+    let known = HelperRegistrationDiagnostic.suffix(
+        domain: "com.apple.ServiceManagement", code: 5
+    )
+    expect(known.contains("com.apple.ServiceManagement") && known.contains("5"),
+           "a registration failure must expose its diagnostic NSError domain and code")
+    let untrusted = HelperRegistrationDiagnostic.suffix(
+        domain: "/Users/example/private/NTFSLite.app", code: -2
+    )
+    expect(untrusted.contains("unknown") && untrusted.contains("-2")
+           && !untrusted.contains("/Users/example"),
+           "an unexpected NSError domain must not reveal a filesystem path")
+}
+
+helperRegistrationErrorsExposeCodesWithoutArbitraryPaths()
+print("PASS: helper registration errors retain safe domain and code")
+
+func helperHealthReplyMustMatchFreshChallengeExactly() {
+    let challenge = Data((0..<16).map(UInt8.init))
+    let otherChallenge = Data((1...16).map(UInt8.init))
+    let response = HelperHealthCheck.response(for: challenge)
+    expect(response != nil, "a fixed-size health challenge must have one response")
+    expect(HelperHealthCheck.accepts(response ?? Data(), for: challenge),
+           "the live health reply must match the current challenge")
+    expect(!HelperHealthCheck.accepts(response ?? Data(), for: otherChallenge),
+           "a prior health reply must not validate a later connection")
+    expect(!HelperHealthCheck.accepts((response ?? Data()) + Data([0]), for: challenge),
+           "a reply with trailing data must fail closed")
+    expect(HelperHealthCheck.response(for: Data()) == nil
+           && HelperHealthCheck.response(for: challenge + Data([0])) == nil,
+           "malformed challenge lengths must fail closed")
+}
+
+helperHealthReplyMustMatchFreshChallengeExactly()
+print("PASS: helper XPC health reply binds one exact challenge")
+
 func setupReportContradictionsFailClosedAcrossPresentationAndFacts() {
     let report = SystemSetupReport(
         facts: readySetupFacts(),
@@ -17550,6 +17605,7 @@ final class FakeWritableMountSystem: WritableMountSystem, @unchecked Sendable {
     var bootSectors: [Data]
     var healthClean: Bool? = true
     var fsKitReady: Bool? = true
+    var onRuntimeProbe: ((FakeWritableMountSystem) -> Void)?
     var replacementVolumeUUIDAfterHealth: String?
     var nativeUnmountSucceeds = true
     var mount: HelperMountEntry?
@@ -17607,6 +17663,7 @@ final class FakeWritableMountSystem: WritableMountSystem, @unchecked Sendable {
     }
     func fsKitRuntimeReady() async -> Bool? {
         calls.append("runtime")
+        onRuntimeProbe?(self)
         return fsKitReady
     }
     func unmountNative(bsdName: String, expectedRegistryEntryID: UInt64) async -> Bool {
@@ -17747,6 +17804,16 @@ func helperProcessInventoryRejectsTruncationAndUnknownProcesses() {
            "a process proven exited can be ignored")
     expect(!HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(errno: EACCES),
            "an active but unreadable process must make owned-mount discovery unknown")
+    expect(HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(errno: 0, confirmedZombie: true),
+           "a kernel-confirmed zombie must not block a complete owned-mount scan even though kill(pid, 0) succeeds")
+    for zombie in [false, nil] as [Bool?] {
+        expect(!HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(errno: 0, confirmedZombie: zombie),
+               "live or unconfirmed processes cannot be omitted from owned-mount discovery")
+    }
+    for error in [EPERM, EACCES, EINVAL] {
+        expect(!HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(errno: error, confirmedZombie: true),
+               "permission failures and contradictory process evidence must remain unknown")
+    }
 }
 
 helperProcessInventoryRejectsTruncationAndUnknownProcesses()
@@ -17908,8 +17975,21 @@ func writableMountExecutorVerifiesBeforeAndAfterMutation() async {
                   "an unreadable or non-NTFS boot sector must be refused before unmounting")
     await refused({ $0.fsKitReady = false }, .fsKitUnavailable,
                   "a disabled FSKit runtime must be refused before native unmount")
-    await refused({ $0.fsKitReady = nil }, .fsKitUnavailable,
+    await refused({ $0.fsKitReady = nil }, .fsKitProbeUnresolved,
                   "an unknown FSKit runtime must be refused before native unmount")
+
+    await refused({ $0.onRuntimeProbe = { $0.facts["disk6s2"]?.volumeUUID = nil } }, .identityUnavailable,
+                  "a UUID lost during image proof must stop before native unmount")
+    await refused({ $0.onRuntimeProbe = { $0.facts["disk6s2"]?.volumeUUID = "99999999-2222-3333-4444-555555555555" } }, .volumeUUIDMismatch,
+                  "a UUID changed during image proof must stop before native unmount")
+    for writable: Bool? in [true, nil] {
+        await refused({ $0.onRuntimeProbe = { $0.facts["disk6s2"]?.isWritableMount = writable } }, .notNativeReadOnly,
+                      "a readonly flag changed or lost during image proof must stop before native unmount")
+    }
+    await refused({ $0.onRuntimeProbe = { $0.facts["disk6s2"]?.mountPoint = "/Volumes/Replaced" } }, .notNativeReadOnly,
+                  "a mount point changed during image proof must stop before native unmount")
+    await refused({ $0.onRuntimeProbe = { $0.ownedByDevice["/dev/disk6s2"] = [HelperOwnedMount(mountPoint: "/Volumes/NTFSLAB", driverPID: 4242)] } }, .notNativeReadOnly,
+                  "a backend owned mount appearing during image proof must stop before native unmount")
 
     func afterUnmount(_ configure: (FakeWritableMountSystem) -> Void, _ expected: WritableMountFailure,
                       started: Bool, _ message: String) async {

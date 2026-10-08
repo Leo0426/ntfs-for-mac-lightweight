@@ -1,0 +1,9 @@
+Creating NTFS volume structures.
+mkntfs completed successfully. Have a nice day.
+/var/folders/9p/_bljh5tx6zl_t27699f0dyfm0000gn/T/ntfslite-blank-seed-jvi1yw6s/blank.ntfs is not a block device.
+mkntfs forced anyway.
+The partition start sector was not specified for /var/folders/9p/_bljh5tx6zl_t27699f0dyfm0000gn/T/ntfslite-blank-seed-jvi1yw6s/blank.ntfs and it could not be obtained automatically.  It has been set to 0.
+The number of sectors per track was not specified for /var/folders/9p/_bljh5tx6zl_t27699f0dyfm0000gn/T/ntfslite-blank-seed-jvi1yw6s/blank.ntfs and it could not be obtained automatically.  It has been set to 0.
+The number of heads was not specified for /var/folders/9p/_bljh5tx6zl_t27699f0dyfm0000gn/T/ntfslite-blank-seed-jvi1yw6s/blank.ntfs and it could not be obtained automatically.  It has been set to 0.
+To boot from a device, Windows needs the 'partition start sector', the 'sectors per track' and the 'number of heads' to be set.
+Windows will not be able to boot from this device.

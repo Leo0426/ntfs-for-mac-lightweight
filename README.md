@@ -12,8 +12,9 @@
 或标准整盘卸载与推出。当前仅开放 GPT Microsoft Basic Data NTFS 目标，以及同盘可选的未挂载
 EFI 分区。独立 Gate 1 证据工具仍未取得人工签署的实物证据，不能报告 Gate pass；Gate 1–5
 状态不因正式 App 接入写入而改变。现有可牺牲 U 盘写入闭环属于有限验证；新增 GPT/EFI 路径的
-快速拔插、真正整盘推出和 Windows 复核仍未完成，不能视为已验证消费级安全性。当前本地构建
-产物仅供检查；受保护安装路径的完整验证尚未完成。
+快速拔插、真正整盘推出和 Windows 复核仍未完成，不能视为已验证消费级安全性。2026-09-30
+本机已完成首次受保护安装并通过安装后权限、清单与签名核验；helper 注册、系统批准、XPC 与
+当前正式 App 的实盘写入尚未完成，不能视为实盘可写。
 
 Gate 的编号、定义、前置关系和当前状态只以[分阶段实施计划](docs/engineering/implementation-plan.md)为准；README、PRD 和调研文档不单独宣布 Gate 通过。
 
@@ -126,9 +127,34 @@ open .build/NTFSLite.app
 
 构建脚本需要本机 Apple Development 签名身份，以及 `.build/dependency-candidates/` 中与脚本摘要
 一致的两个固定 NTFS-3G 制品。`.build/NTFSLite.app` 位于用户可写目录，只用于构建、签名与界面
-检查；不能从此路径启用特权 helper 或执行真实挂载、卸载、推出。启用 helper 前还需把 App 安装
-到 root 所有、非 root 用户不可写的受保护位置，并完成安装路径和签名验证；当前本地构建命令
-不完成这些步骤，也不代表可在实盘上使用。写入路径另需已配置的 macFUSE FSKit。
+检查；不能从此路径启用特权 helper 或执行真实挂载、卸载、推出。写入路径另需已配置的 macFUSE
+FSKit。
+
+首次受保护安装使用系统 Installer 安装包：
+
+```bash
+scripts/build-local-installer.sh
+python3 scripts/verify-local-installer.py .build/NTFSLite-local.pkg .build/NTFSLite.app
+scripts/install-local-installer.sh
+scripts/verify-protected-install.sh
+open /Library/PrivilegedHelperTools/NTFSLite.app
+```
+
+包的 payload 固定为 `/Library/PrivilegedHelperTools/NTFSLite.app`。安装入口先将本地未签名 pkg
+复制到 root 所有的暂存目录，对不可由普通用户改写的副本做离线核验，Installer 使用同一副本；
+包内预检拒绝已有目标或不可信父目录。安装不会自动注册 helper 或操作磁盘。安装后先通过验证
+脚本核对 root 属主、权限、ACL、完整文件清单与签名，再在已安装 App 的“运行环境”页点击
+“启用帮助程序”或“尝试注册帮助程序”，按 macOS 系统设置提示由管理员批准。App 只在
+签名 XPC 健康检查通过后开放写入入口，实际磁盘操作仍由 helper
+逐次重新核对。本包只支持**首次安装**，已有目标时不会覆盖；更新、卸载与旧服务清理尚无安全
+自动流程。本机只有 Apple Development 身份，此包不是 Developer ID 签名／公证的分发制品。
+Apple SDK 27 对含 LaunchDaemon 的 App 写有公证要求；旧 tracer 的本机开发签名成功经验不能
+替代当前安装件的注册实测。详见 [ADR 0012](docs/adr/0012-protected-local-install-and-live-helper-check.md)。
+
+安装包与暂存交接的离线回归另运行 `python3 scripts/test_local_installer.py` 和
+`python3 scripts/test_install_local_installer.py`；测试不会调用管理员授权或 Installer。
+当前已安装的旧构建不含“尝试注册”按钮，首次安装包也拒绝覆盖它；更新须先完成单独的
+受保护替换流程，不能直接重跑首次安装命令。
 
 `scripts/build-local-read-only-app.sh` 仅构建不包含 helper 的只读打包检查件，输出为
 `.build/NTFSLiteReadOnlyApp.app`，不是上述正式 App。
@@ -170,7 +196,7 @@ sidecar 和复核命令见[Gate 验证运行手册](docs/operations/gate-validat
 scripts/check.sh
 ```
 
-需要 Apple Silicon Mac、macOS 15.4+、支持 Swift 6 的命令行工具链及 Python 3。该入口会执行
+需要 Apple Silicon Mac、macOS 15.4+、支持 Swift 6 的命令行工具链及 Python 3.11+。该入口会执行
 全量 warnings-as-errors Release 构建、行为检查、CLI 输入回归、只读包/源码边界、无 helper
 检查件构建与签名验证，以及篡改包负向回归。正式签名 App 需另行运行
 `scripts/build-local-app.sh`。任一步失败立即退出；这些构建与检查不会安装 helper 或改变磁盘。

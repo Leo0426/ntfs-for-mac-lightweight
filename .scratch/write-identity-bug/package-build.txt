@@ -1,0 +1,11 @@
+PASS: 已构建并核验签名 App：/Users/heyonepiece/Projects/chatgpt_worktrees/protected-helper-install/ntfs-for-mac-lightweight/.build/NTFSLite.app
+write: Permission denied
+write: Permission denied
+write: Permission denied
+write: Permission denied
+pkgbuild: Reading components from /Users/heyonepiece/Projects/chatgpt_worktrees/protected-helper-install/ntfs-for-mac-lightweight/.build/ntfslite-installer.d2zAgI/components.plist
+pkgbuild: Adding component at Library/PrivilegedHelperTools/NTFSLite.app
+pkgbuild: Adding top-level preinstall script
+pkgbuild: Wrote package to /Users/heyonepiece/Projects/chatgpt_worktrees/protected-helper-install/ntfs-for-mac-lightweight/.build/ntfslite-installer.d2zAgI/NTFSLite-local.pkg
+PASS: 本机安装包 payload、脚本、root:wheel BOM 与签名 App 已离线核对。
+PASS: 已构建并离线核验首次安装包：/Users/heyonepiece/Projects/chatgpt_worktrees/protected-helper-install/ntfs-for-mac-lightweight/.build/NTFSLite-local.pkg

@@ -3,6 +3,7 @@ import Foundation
 import NTFSLiteCore
 import NTFSLiteHelperProtocol
 import NTFSLitePresentation
+import NTFSLiteProtectedInstall
 import NTFSLiteSystem
 import NTFSLiteWriteSession
 import ServiceManagement
@@ -18,6 +19,26 @@ private func announceWriteStatus(_ text: String) {
 /// established means nothing was delivered; an interruption after sending is an unknown outcome.
 struct HelperXPCTransport: HelperTransport {
     static let replyTimeout: TimeInterval = 180
+    static let healthTimeout: TimeInterval = 10
+
+    func healthCheck() async -> Bool {
+        await withCheckedContinuation { continuation in
+            let connection = NSXPCConnection(machServiceName: HelperServiceIdentity.machServiceName, options: .privileged)
+            connection.remoteObjectInterface = NSXPCInterface(with: NTFSLiteHelperXPC.self)
+            connection.setCodeSigningRequirement(HelperServiceIdentity.helperRequirement)
+            let once = ResumeOnce(continuation, connection: connection)
+            var uuidBytes = UUID().uuid
+            let challenge = withUnsafeBytes(of: &uuidBytes) { Data($0) }
+            connection.resume()
+            let proxy = connection.remoteObjectProxyWithErrorHandler { _ in once.resume(false) }
+                as? NTFSLiteHelperXPC
+            guard let proxy else { once.resume(false); return }
+            proxy.healthCheck(challenge) { reply in
+                once.resume(HelperHealthCheck.accepts(reply, for: challenge))
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + Self.healthTimeout) { once.resume(false) }
+        }
+    }
 
     func send(_ request: Data) async -> HelperTransportResult {
         await withCheckedContinuation { continuation in
@@ -41,42 +62,24 @@ struct HelperXPCTransport: HelperTransport {
     }
 }
 
-private final class ResumeOnce: @unchecked Sendable {
+private final class ResumeOnce<Value: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
-    private var continuation: CheckedContinuation<HelperTransportResult, Never>?
+    private var continuation: CheckedContinuation<Value, Never>?
     private let connection: NSXPCConnection
 
-    init(_ continuation: CheckedContinuation<HelperTransportResult, Never>, connection: NSXPCConnection) {
+    init(_ continuation: CheckedContinuation<Value, Never>, connection: NSXPCConnection) {
         self.continuation = continuation
         self.connection = connection
     }
 
-    func resume(_ result: HelperTransportResult) {
-        let pending = lock.withLock { () -> CheckedContinuation<HelperTransportResult, Never>? in
+    func resume(_ result: Value) {
+        let pending = lock.withLock { () -> CheckedContinuation<Value, Never>? in
             defer { continuation = nil }
             return continuation
         }
         guard let pending else { return }
         connection.invalidate()
         pending.resume(returning: result)
-    }
-}
-
-enum HelperServiceState: Equatable {
-    case enabled
-    case requiresApproval
-    case notRegistered
-    case requiresProtectedInstallation
-    case unavailable
-
-    var text: String {
-        switch self {
-        case .enabled: "帮助程序已启用。"
-        case .requiresApproval: "帮助程序等待批准：请在“系统设置 → 通用 → 登录项与扩展”中允许。"
-        case .notRegistered: "帮助程序尚未启用。启用后可由它执行固定的挂载与推出操作。"
-        case .requiresProtectedInstallation: "当前应用是构建或未受保护的检查件。请使用安装在受保护系统位置的正式应用，再启用帮助程序。"
-        case .unavailable: "帮助程序状态无法确认，当前不提供磁盘操作。"
-        }
     }
 }
 
@@ -149,6 +152,17 @@ final class WriteController: ObservableObject {
     private var latestObservation: DiskInventoryObservation?
     private var sessionDiskLabels: [DiskInstanceID: String] = [:]
     private var nextSessionDiskNumber = 1
+    private var helperCheckToken = UUID()
+
+    private func protectedInstallationIsTrusted() -> Bool {
+        SecureHelperDeployment.verifyInstalled(
+            appIdentifier: HelperServiceIdentity.appIdentifier,
+            helperIdentifier: HelperServiceIdentity.helperIdentifier,
+            driverIdentifier: SecureHelperDeployment.driverIdentifier,
+            probeIdentifier: SecureHelperDeployment.probeIdentifier,
+            teamIdentifier: HelperServiceIdentity.teamIdentifier
+        )
+    }
 
     init(
         refreshObservation: @escaping @MainActor () -> Void,
@@ -162,18 +176,52 @@ final class WriteController: ObservableObject {
     }
 
     func refreshHelperState() {
+        helperCheckToken = UUID()
+        let token = helperCheckToken
         guard HelperEnablementUI.shouldOfferRegistration(for: Bundle.main.bundleURL) else {
             helperState = .requiresProtectedInstallation
             helperMessage = nil
             return
         }
-        helperState = switch service.status {
-        case .enabled: .enabled
-        case .requiresApproval: .requiresApproval
-        case .notRegistered: .notRegistered
-        default: .unavailable
+        guard protectedInstallationIsTrusted() else {
+            helperState = .unavailable
+            helperMessage = "受保护安装件的属主、权限、文件清单或签名无法核验；请重新安装后检查。"
+            return
         }
-        if helperState == .enabled { helperMessage = nil }
+        switch service.status {
+        case .enabled:
+            helperState = .checkingConnection
+            Task {
+                let reachable = await HelperXPCTransport().healthCheck()
+                guard helperCheckToken == token else { return }
+                guard protectedInstallationIsTrusted() else {
+                    helperState = .unavailable
+                    helperMessage = "受保护安装件已无法核验；当前不开放磁盘操作。"
+                    return
+                }
+                switch service.status {
+                case .enabled:
+                    helperState = reachable ? .enabled : .unavailable
+                    if reachable { helperMessage = nil }
+                case .requiresApproval:
+                    helperState = .requiresApproval
+                case .notRegistered:
+                    helperState = .notRegistered
+                case .notFound:
+                    helperState = .notFound
+                default:
+                    helperState = .unavailable
+                }
+            }
+        case .requiresApproval:
+            helperState = .requiresApproval
+        case .notRegistered:
+            helperState = .notRegistered
+        case .notFound:
+            helperState = .notFound
+        default:
+            helperState = .unavailable
+        }
     }
 
     func installHelper() {
@@ -181,12 +229,33 @@ final class WriteController: ObservableObject {
             helperState = .requiresProtectedInstallation
             return
         }
-        guard helperState == .notRegistered else { return }
+        guard protectedInstallationIsTrusted() else {
+            helperState = .unavailable
+            helperMessage = "受保护安装件的属主、权限、文件清单或签名无法核验；不能注册帮助程序。"
+            return
+        }
+        guard helperState.canAttemptRegistration else { return }
+        guard service.status == .notRegistered || service.status == .notFound else {
+            refreshHelperState()
+            return
+        }
         helperMessage = nil
         do {
             try service.register()
         } catch {
-            helperMessage = "帮助程序安装未完成。请检查系统设置中的登录项与扩展，然后重新检查。"
+            let failure = error as NSError
+            let diagnostic = HelperRegistrationDiagnostic.suffix(
+                domain: failure.domain, code: failure.code
+            )
+            if failure.domain == SMAppServiceErrorDomain,
+               failure.code == Int(kSMErrorInvalidSignature) {
+                helperMessage = "系统拒绝了应用签名。当前安装件不能启用帮助程序；请核对签名与公证条件。\(diagnostic)"
+            } else if failure.domain == SMAppServiceErrorDomain,
+                      failure.code == Int(kSMErrorLaunchDeniedByUser) {
+                helperMessage = "帮助程序尚未获得管理员批准。请到系统设置中允许后重新检查。\(diagnostic)"
+            } else {
+                helperMessage = "帮助程序注册未完成。请重新检查状态、受保护安装与系统批准。\(diagnostic)"
+            }
         }
         refreshHelperState()
         if helperState == .requiresApproval {

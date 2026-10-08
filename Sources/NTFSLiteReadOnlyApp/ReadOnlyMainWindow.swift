@@ -678,8 +678,9 @@ private struct ReadOnlySetupDetail: View {
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                if store.writeController.helperState == .notRegistered {
-                    Button("启用帮助程序") {
+                if store.writeController.helperState.canAttemptRegistration {
+                    Button(store.writeController.helperState == .notFound
+                           ? "尝试注册帮助程序" : "启用帮助程序") {
                         store.writeController.installHelper()
                     }
                     .buttonStyle(.borderedProminent)
