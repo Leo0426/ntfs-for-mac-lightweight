@@ -22,3 +22,9 @@ macFUSE 维护者在 [issue #1194 的回复](https://github.com/macfuse/macfuse/
 同日用户确认两个模块均已开启。该确认记录为用户完成系统设置操作，不等于正式 App 的 FSKit 挂载验收。
 
 随后只读复核：受保护路径的 App 仍为 0.1.0 (1)，launchd system 域找不到 v2 helper；后台任务记录仍包含旧 v1 helper 的 enabled/allowed 状态，没有 v2 记录。剩余事项是旧服务的安全迁移、受保护 App 更新、v2 注册/批准和 XPC 核验。
+
+## 后续更正
+
+上一节是 2026-09-30 早些时候的状态。同日已完成旧 v1 注销、受保护更新与 v2 注册及签名 XPC
+核验，见 `../helper-maintenance-2026-09-30/RESULT.md` 与 `../helper-page-refresh-bug/RESULT.md`；
+0.1.4（5）更新的待办见 `../fskit-runtime-preflight-fix/RESULT.md`。
