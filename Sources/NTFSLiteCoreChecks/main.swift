@@ -13109,10 +13109,9 @@ func diagnosticsRetainsOnlyTypedBoundedDeterministicEntries() async {
 
     do {
         let json = try snapshot.encodedJSON()
-        let copyText = try snapshot.copyText()
+        let canonicalText = String(decoding: json, as: UTF8.self)
         let secondSnapshot = await diagnostics.snapshot()
         let secondJSON = try secondSnapshot.encodedJSON()
-        expect(copyText == String(decoding: json, as: UTF8.self), "copy text should reuse exact JSON")
         expect(
             json == secondJSON,
             "a fixed clock should produce deterministic snapshot bytes"
@@ -13120,7 +13119,7 @@ func diagnosticsRetainsOnlyTypedBoundedDeterministicEntries() async {
         let forbiddenKeys = ["bsdName", "mountPoint", "volumeName", "driverName", "stderr"]
         for forbiddenKey in forbiddenKeys {
             expect(
-                !copyText.contains(forbiddenKey),
+                !canonicalText.contains(forbiddenKey),
                 "diagnostics JSON must not contain free-form field \(forbiddenKey)"
             )
         }
@@ -13872,8 +13871,12 @@ func diagnosticProjectionDropsRawDomainPoisonValues() async {
             )
         )
         try await diagnostics.record(DiagnosticProjection.inventory(observation))
-        let text = try await diagnostics.snapshot().copyText()
+        let snapshot = await diagnostics.snapshot()
+        let text = String(decoding: try snapshot.encodedJSON(), as: UTF8.self)
+        let readableText = try snapshot.copyText()
         expect(!text.contains(poison), "diagnostic projection must drop every raw poison value")
+        expect(!readableText.contains(poison) && !readableText.contains("SECRET"),
+               "readable diagnostics must preserve the projection's privacy boundary")
         expect(!text.contains("private-user"), "diagnostics must not retain usernames")
         expect(!text.contains("SECRET"), "diagnostics must not retain volume labels")
         expect(
@@ -15620,7 +15623,7 @@ func diagnosticSnapshotArchivePersistsOnlyCanonicalPrivateEvidence() async {
             "a new snapshot should save after a successful clear"
         )
 
-        let canonical = try snapshot.copyText()
+        let canonical = String(decoding: try snapshot.encodedJSON(), as: UTF8.self)
         let zeroGeneration = canonical.replacingOccurrences(
             of: "\"mediaGeneration\":7",
             with: "\"mediaGeneration\":0"
@@ -16545,6 +16548,18 @@ readOnlyAccessibilityAnnouncementDescribesTheCurrentSelection()
 print("PASS: accessibility announcement describes the current selection")
 readOnlyDiagnosticFeedbackUsesStableVisibleAndAccessibleText()
 print("PASS: read-only diagnostic feedback uses stable visible and accessible text")
+await diagnosticSummaryExplainsLatestFactsAndNextSteps()
+print("PASS: diagnostic summary explains latest facts and next steps")
+await diagnosticSummaryDoesNotInventMissingEvidence()
+print("PASS: diagnostic summary does not invent missing evidence")
+await diagnosticSummaryExplainsUnconfirmedSetupWithoutIssueCodes()
+print("PASS: diagnostic summary explains unconfirmed setup without issue codes")
+await diagnosticSummaryMarksHistoryAndFormatsLocalTime()
+print("PASS: diagnostic summary marks history and formats local time")
+await diagnosticSummaryBoundsRecentHistoryAndUsesAnonymousTargets()
+print("PASS: diagnostic summary bounds recent history and uses anonymous targets")
+await diagnosticSummaryTranslatesEveryObservedIssueCode()
+print("PASS: diagnostic summary translates every observed issue code")
 await diagnosticsRetainsOnlyTypedBoundedDeterministicEntries()
 print("PASS: diagnostics retains only typed bounded deterministic entries")
 setupOutputParsersRejectAmbiguityAndUnknownRecords()

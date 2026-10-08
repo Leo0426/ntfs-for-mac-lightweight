@@ -407,10 +407,11 @@ private struct ReadOnlyDiagnosticsDetail: View {
                     .accessibilityLabel(actionFeedback.accessibilityAnnouncement)
             }
 
-            GroupBox("结构化内容") {
+            GroupBox("诊断报告") {
                 ScrollView(.vertical) {
-                    Text(readableDiagnosticsText)
-                        .font(.system(.caption, design: .monospaced))
+                    Text(store.diagnosticsText)
+                        .font(.body)
+                        .lineSpacing(5)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .fixedSize(horizontal: false, vertical: true)
@@ -418,17 +419,6 @@ private struct ReadOnlyDiagnosticsDetail: View {
                 .frame(minHeight: 220, maxHeight: 360)
             }
         }
-    }
-
-    private var readableDiagnosticsText: String {
-        guard let input = store.diagnosticsText.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: input),
-              let formatted = try? JSONSerialization.data(
-                  withJSONObject: object, options: [.prettyPrinted, .sortedKeys]
-              ),
-              let text = String(data: formatted, encoding: .utf8)
-        else { return store.diagnosticsText }
-        return text
     }
 
     private var copySummaryButton: some View {

@@ -305,7 +305,7 @@ final class ReadOnlyAppStore: ObservableObject {
             switch result {
             case let .loaded(snapshot):
                 do {
-                    self.diagnosticsText = try snapshot.copyText()
+                    self.diagnosticsText = try snapshot.copyText(source: .previousRun)
                 } catch {
                     self.diagnosticsText = "上次诊断存档不可用。"
                 }

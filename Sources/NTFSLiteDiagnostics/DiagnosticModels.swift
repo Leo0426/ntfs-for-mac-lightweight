@@ -522,8 +522,11 @@ public struct DiagnosticSnapshot: Codable, Equatable, Sendable {
         return try encoder.encode(self)
     }
 
-    public func copyText() throws -> String {
-        String(decoding: try encodedJSON(), as: UTF8.self)
+    public func copyText(
+        source: DiagnosticSummarySource = .currentRun,
+        timeZone: TimeZone = .current
+    ) throws -> String {
+        DiagnosticSummaryFormatter.text(for: self, source: source, timeZone: timeZone)
     }
 }
 
