@@ -1,6 +1,6 @@
 # 彻底移除受保护安装（2026-10-08）
 
-状态：脚本已就绪，等待用户以 root 执行。
+状态：文件、launchd 任务与安装收据已移除；BTM 记录与 LaunchServices 登记尚有残留。
 
 ## 背景
 
@@ -23,3 +23,16 @@
 执行 `pkgutil --forget`；最后打印剩余 BTM 记录。
 不做的事：不碰磁盘，不用 `sfltool resetbtm`，不改其他 App 的后台项。BTM 记录没有逐条删除的接口，
 只能看删除 bundle 并重启后系统是否自行清理。
+
+## 执行结果
+
+用户执行后脚本输出 PASS：v1、v2 已不在 launchd 的 system 域；受保护 App、5 个维护目录与 3 个诊断目录已删除；
+安装收据已 forget。
+
+独立只读复核：上述路径都不存在，`pkgutil` 中已无 `leolu` 收据，launchd 查无 v1/v2，没有相关进程。
+仍有残留：
+- BTM：v1、v2 daemon 记录，以及 2 条 `2.com.leolu.ntfslite.readonly` 容器记录（一条指向 `.build` tracer，
+  一条指向已删除的受保护路径）；
+- LaunchServices：仍登记着已删除的受保护路径，以及 `.build/` 下的 4 个开发副本。
+
+下一步：注销 LaunchServices 中的开发副本和失效路径，然后重启，复核 BTM 是否自行清理。
