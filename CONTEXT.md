@@ -233,3 +233,12 @@ _Avoid_: Trusted Snapshot, Persistent Allowlist, Write Capability
 由实验协调器核对。管理员协调器仅在文件操作范围临时切换有效身份并恢复，独立读回和
 标准卸载子进程永久使用挂载用户身份。Darwin 账户默认组列表不能替代实际进程组列表。
 此方式已获得管理员镜像挂载证据，但物理 USB 文件闭环须另行验证，不构成正式 helper 设计。
+
+
+**Runtime Image Proof（运行时镜像证明）**：
+每次写入请求由正式 helper 对签名安装件内的固定空白 NTFS 种子新建独占副本，使用同一驱动、
+永久挂载身份和 FSKit local 参数；真实可写挂载及镜像归属、标准卸载、挂载不存在、驱动已回收
+与临时资源已删除均确认后产生的当次后端证据。未知收尾保留全局资格并阻止 idle exit；结果不缓存。
+它不证明物理目标、Data Volume Declaration、实盘文件语义、Windows 兼容性或 Gate 通过。
+见 [ADR 0013](docs/adr/0013-verify-runtime-with-disposable-image.md)。
+_Avoid_: FSClient Visibility, Cached Backend Readiness, Physical Disk Authorization

@@ -103,13 +103,26 @@ struct SecureHelperDeploymentChecks {
                 "Contents/Info.plist",
                 "Contents/Library/LaunchDaemons/com.leolu.ntfslite.helper.v2.plist",
                 "Contents/MacOS/NTFSLiteHelper", "Contents/MacOS/NTFSLiteReadOnlyApp",
-                "Contents/Resources/NTFSLite.icns", "Contents/_CodeSignature/CodeResources",
+                "Contents/Resources/NTFSLite.icns", "Contents/Resources/FSKitRuntimeProbe.ntfs.zlib",
+                "Contents/_CodeSignature/CodeResources",
             ] {
                 guard manager.createFile(atPath: app.appendingPathComponent(path).path,
                                          contents: Data()) else { throw CocoaError(.fileWriteUnknown) }
             }
             expect(SecureHelperDeployment.hasExactManifest(at: app.path),
                    "the complete fixed app manifest should pass")
+
+            let seed = app.appendingPathComponent("Contents/Resources/FSKitRuntimeProbe.ntfs.zlib")
+            try manager.removeItem(at: seed)
+            expect(!SecureHelperDeployment.hasExactManifest(at: app.path),
+                   "a missing runtime seed must fail")
+            try manager.createSymbolicLink(at: seed, withDestinationURL: app.appendingPathComponent("Contents/Info.plist"))
+            expect(!SecureHelperDeployment.hasExactManifest(at: app.path),
+                   "a linked runtime seed must fail")
+            try manager.removeItem(at: seed)
+            guard manager.createFile(atPath: seed.path, contents: Data()) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
 
             let extraFile = app.appendingPathComponent("Contents/Resources/extra.bin")
             guard manager.createFile(atPath: extraFile.path, contents: Data()) else {

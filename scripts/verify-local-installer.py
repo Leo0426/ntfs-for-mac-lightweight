@@ -38,6 +38,7 @@ EXPECTED_APP_FILES = {
     "Contents/MacOS/NTFSLiteHelper",
     "Contents/MacOS/NTFSLiteReadOnlyApp",
     "Contents/Resources/NTFSLite.icns",
+    "Contents/Resources/FSKitRuntimeProbe.ntfs.zlib",
     "Contents/_CodeSignature/CodeResources",
 }
 EXPECTED_APP_DIRS = {

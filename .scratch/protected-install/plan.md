@@ -40,3 +40,19 @@ Labels: enhancement, in-progress
 - `scripts/check-read-only-boundary.sh`、严格 Release 全量构建与 `scripts/check.sh` 通过。
 - pkg 离线核验通过；受保护安装及 XPC 结果单独记录，不用构建成功替代实际运行。
 - 快速拔插 BSD 名复用竞态仍按 ADR 0011 保留，不开展用户数据盘试验。
+
+## 2026-09-30 用户授权维护后的进展
+
+- 用户明确授权旧服务注销、重新注册与启动，覆盖之前“稍后批准”的时间安排。
+- 已用经过固定签名核验的旧 tracer 完成 SMAppService 注销；独立 status 为 notRegistered，旧后台记录为 disabled，旧/新 launchd 服务均不存在。
+- 再核对静止状态和 root 所有树后，原 App 移至 root-only 回退目录，由 Installer 安装已离线核验并固定摘要的新包；版本现为 0.1.1（2），安装后全部文件摘要、权限、ACL、清单及固定签名通过。此前“旧构建仍未更新”的事项已解决。
+- 已打开新版正式 App；界面控制工具原生连接故障，已请用户点击注册入口并完成系统批准。v2 注册与实际签名 XPC 核验仍须取得结果。
+- 详细本机操作与回退位置见 `../helper-maintenance-2026-09-30/RESULT.md`。本次维护未操作任何磁盘。
+
+## 2026-09-30 写入误拒绝修复
+
+- 用户已完成 v2 注册；0.1.1（2）签名 XPC 健康检查通过，写入仍在未变更阶段拒绝。
+- 原因之一是完整 PID 表内的已退出 zombie 被当作不可读活跃进程，使拓扑检查 factsUnavailable。TDD 修复与本机只读 RED→GREEN 通过。
+- 已按静止/注销/固定摘要/回退流程安装 0.1.2（3），权限、清单、全部摘要与签名通过，打开新版。更新后注册及 XPC 等待界面操作复核。
+- 后续 FSKit 门槛也已实测失败，局部登记刷新无改善；维护者建议用户 LaunchServices 重建与立即重启，此全局步骤尚未执行。
+- 详细范围与验证边界见 `../write-identity-bug/RESULT.md`。

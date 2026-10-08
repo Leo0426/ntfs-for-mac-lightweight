@@ -17590,6 +17590,7 @@ final class FakeWritableMountSystem: WritableMountSystem, @unchecked Sendable {
     var bootSectors: [Data]
     var healthClean: Bool? = true
     var fsKitReady: Bool? = true
+    var onRuntimeProbe: ((FakeWritableMountSystem) -> Void)?
     var replacementVolumeUUIDAfterHealth: String?
     var nativeUnmountSucceeds = true
     var mount: HelperMountEntry?
@@ -17647,6 +17648,7 @@ final class FakeWritableMountSystem: WritableMountSystem, @unchecked Sendable {
     }
     func fsKitRuntimeReady() async -> Bool? {
         calls.append("runtime")
+        onRuntimeProbe?(self)
         return fsKitReady
     }
     func unmountNative(bsdName: String, expectedRegistryEntryID: UInt64) async -> Bool {
@@ -17787,6 +17789,16 @@ func helperProcessInventoryRejectsTruncationAndUnknownProcesses() {
            "a process proven exited can be ignored")
     expect(!HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(errno: EACCES),
            "an active but unreadable process must make owned-mount discovery unknown")
+    expect(HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(errno: 0, confirmedZombie: true),
+           "a kernel-confirmed zombie must not block a complete owned-mount scan even though kill(pid, 0) succeeds")
+    for zombie in [false, nil] as [Bool?] {
+        expect(!HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(errno: 0, confirmedZombie: zombie),
+               "live or unconfirmed processes cannot be omitted from owned-mount discovery")
+    }
+    for error in [EPERM, EACCES, EINVAL] {
+        expect(!HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(errno: error, confirmedZombie: true),
+               "permission failures and contradictory process evidence must remain unknown")
+    }
 }
 
 helperProcessInventoryRejectsTruncationAndUnknownProcesses()
@@ -17948,8 +17960,21 @@ func writableMountExecutorVerifiesBeforeAndAfterMutation() async {
                   "an unreadable or non-NTFS boot sector must be refused before unmounting")
     await refused({ $0.fsKitReady = false }, .fsKitUnavailable,
                   "a disabled FSKit runtime must be refused before native unmount")
-    await refused({ $0.fsKitReady = nil }, .fsKitUnavailable,
+    await refused({ $0.fsKitReady = nil }, .fsKitProbeUnresolved,
                   "an unknown FSKit runtime must be refused before native unmount")
+
+    await refused({ $0.onRuntimeProbe = { $0.facts["disk6s2"]?.volumeUUID = nil } }, .identityUnavailable,
+                  "a UUID lost during image proof must stop before native unmount")
+    await refused({ $0.onRuntimeProbe = { $0.facts["disk6s2"]?.volumeUUID = "99999999-2222-3333-4444-555555555555" } }, .volumeUUIDMismatch,
+                  "a UUID changed during image proof must stop before native unmount")
+    for writable: Bool? in [true, nil] {
+        await refused({ $0.onRuntimeProbe = { $0.facts["disk6s2"]?.isWritableMount = writable } }, .notNativeReadOnly,
+                      "a readonly flag changed or lost during image proof must stop before native unmount")
+    }
+    await refused({ $0.onRuntimeProbe = { $0.facts["disk6s2"]?.mountPoint = "/Volumes/Replaced" } }, .notNativeReadOnly,
+                  "a mount point changed during image proof must stop before native unmount")
+    await refused({ $0.onRuntimeProbe = { $0.ownedByDevice["/dev/disk6s2"] = [HelperOwnedMount(mountPoint: "/Volumes/NTFSLAB", driverPID: 4242)] } }, .notNativeReadOnly,
+                  "a backend owned mount appearing during image proof must stop before native unmount")
 
     func afterUnmount(_ configure: (FakeWritableMountSystem) -> Void, _ expected: WritableMountFailure,
                       started: Bool, _ message: String) async {

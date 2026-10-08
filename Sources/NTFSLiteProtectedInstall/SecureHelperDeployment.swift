@@ -36,7 +36,8 @@ public enum SecureHelperDeployment {
     private static let regularFilePaths: Set<String> = [
         "Contents/Info.plist",
         "Contents/Library/LaunchDaemons/com.leolu.ntfslite.helper.v2.plist",
-        "Contents/Resources/NTFSLite.icns", "Contents/_CodeSignature/CodeResources",
+        "Contents/Resources/NTFSLite.icns", "Contents/Resources/FSKitRuntimeProbe.ntfs.zlib",
+        "Contents/_CodeSignature/CodeResources",
     ]
 
     public static func isExpectedExecutablePath(_ path: String) -> Bool {

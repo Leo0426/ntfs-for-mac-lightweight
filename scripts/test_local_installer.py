@@ -171,6 +171,30 @@ class LocalInstallerChecks(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("preinstall", result.stderr)
 
+    def test_rejects_missing_changed_and_linked_runtime_seed(self) -> None:
+        self.ensure_package()
+        for mutation in ("missing", "changed", "linked"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory(prefix="ntfslite-pkg-seed-") as directory:
+                expanded = Path(directory) / "expanded"
+                run("pkgutil", "--expand-full", PACKAGE, expanded)
+                seed = expanded / "Payload" / APP_RELATIVE / "Contents/Resources/FSKitRuntimeProbe.ntfs.zlib"
+                if mutation == "changed":
+                    data = bytearray(seed.read_bytes())
+                    data[len(data) // 2] ^= 1
+                    seed.write_bytes(data)
+                else:
+                    seed.unlink()
+                    if mutation == "linked":
+                        seed.symlink_to("NTFSLite.icns")
+                package = Path(directory) / "modified.pkg"
+                run("pkgutil", "--flatten", expanded, package)
+                result = subprocess.run(
+                    [sys.executable, str(PROJECT / "scripts/verify-local-installer.py"), str(package), str(APP)],
+                    cwd=PROJECT, capture_output=True, text=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("FAIL:", result.stderr)
+
     def test_rejects_adhoc_signed_package_even_when_source_matches(self) -> None:
         self.ensure_package()
         with tempfile.TemporaryDirectory(prefix="ntfslite-pkg-adhoc-") as directory:

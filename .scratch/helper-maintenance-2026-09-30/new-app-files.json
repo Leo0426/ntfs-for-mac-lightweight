@@ -1,0 +1,10 @@
+{
+  "Contents/Helpers/ntfs-3g": "bcceea1e13bafe0f951734152391c5fb4bccf3e93d7ea0b4f72a5eccb806f7b9",
+  "Contents/Helpers/ntfs-3g.probe": "9526a5add07651b32672d6ced2773297e602fc3854d782cccc6a550f0f3f88fd",
+  "Contents/Info.plist": "25437f66669768f023550d912c29b896f64b538b5f8bd6ac7a895cf53c7d466f",
+  "Contents/Library/LaunchDaemons/com.leolu.ntfslite.helper.v2.plist": "61b68feb490ad1fc8339d96270336ffeed1c37ff1689ad97fe62af295cd0fe66",
+  "Contents/MacOS/NTFSLiteHelper": "1cf9e9875029e7dae7a7ffd3f771c0ded5dfe772c401e213ccf9880090c12451",
+  "Contents/MacOS/NTFSLiteReadOnlyApp": "e8c4ec4104c778f8dbccfa7dd386934d83ae9af335d5829a516d1f25a9eb915f",
+  "Contents/Resources/NTFSLite.icns": "316966680d7835d000d61cfc0872c4de1a3654562b6b54c8bab848018d7d259d",
+  "Contents/_CodeSignature/CodeResources": "e035e30f7ceb0a9eaa968a50ad40f45567154d4781f0aa1864ee3d693a97d927"
+}

@@ -68,8 +68,8 @@ public struct HelperDriverState: Equatable, Sendable {
 /// Primitive system operations the privileged helper implements; every answer is fresh.
 public protocol WritableMountSystem: HelperMediaTopologyReading {
     func readBootSector(partitionBSDName: String) async -> Data?
-    /// Fresh positive proof that the selected FSKit module and bundled driver
-    /// are available to the fixed mount user. Nil is unverified.
+    /// Fresh disposable image mount and complete standard cleanup proof.
+    /// False is a safely closed failure; nil retains unresolved probe resources.
     func fsKitRuntimeReady() async -> Bool?
     /// Standard (never forced) unmount of the native read-only mount.
     func unmountNative(bsdName: String, expectedRegistryEntryID: UInt64) async -> Bool
@@ -104,6 +104,7 @@ public enum WritableMountFailure: Int32, Sendable {
     case factsUnavailable = 13
     case volumeUUIDMismatch = 14
     case fsKitUnavailable = 15
+    case fsKitProbeUnresolved = 16
 }
 
 public enum WritableMountExecutor {
@@ -140,13 +141,22 @@ public enum WritableMountExecutor {
         guard let expectedEntryID = target.disk.partitions.first(where: { $0.bsdName == bsd })?.registryEntryID else {
             return refused(.targetMismatch)
         }
-        // A missing or disabled FSKit module must not cost the user their
-        // existing native read-only mount. This check is per request, not a
-        // Gate 1–3 completion requirement.
-        guard await system.fsKitRuntimeReady() == true else { return refused(.fsKitUnavailable) }
-        guard case .success = await HelperTopologyVerifier.verify(
+        // Complete an independent image proof before changing the native volume.
+        let runtimeReady = await system.fsKitRuntimeReady()
+        guard runtimeReady == true else {
+            return refused(runtimeReady == nil ? .fsKitProbeUnresolved : .fsKitUnavailable)
+        }
+        guard case let .success(freshPartitions) = await HelperTopologyVerifier.verify(
             target.disk, selectedVolumeBSDName: bsd, system: system
         ) else { return refused(.targetMismatch) }
+        guard let fresh = freshPartitions.first(where: { $0.bsdName == bsd }),
+              fresh.facts.fileSystemName?.lowercased() == "ntfs",
+              fresh.facts.mountPoint == mountPoint, fresh.facts.isWritableMount == false,
+              fresh.ownedMounts.isEmpty else { return refused(.notNativeReadOnly) }
+        guard let freshUUID = fresh.facts.volumeUUID else { return refused(.identityUnavailable) }
+        guard freshUUID.caseInsensitiveCompare(target.volumeUUID) == .orderedSame else {
+            return refused(.volumeUUIDMismatch)
+        }
         guard await system.unmountNative(bsdName: bsd, expectedRegistryEntryID: expectedEntryID) else {
             return changed(.nativeUnmountFailed)
         }

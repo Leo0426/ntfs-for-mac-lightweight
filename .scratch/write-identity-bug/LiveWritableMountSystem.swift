@@ -14,7 +14,6 @@ private typealias FileSystemStatus = statfs
 final class LiveWritableMountSystem: WritableMountSystem, @unchecked Sendable {
     static let driverOptions = "rw,no_def_opts,silent,backend=fskit,norecover,no_detach,local"
     static let driverIdentifier = "com.leolu.ntfslite.ntfs-3g"
-    static let runtimeProbe = RuntimeProbeCoordinator()
     static let probeIdentifier = "com.leolu.ntfslite.ntfs-3g.probe"
     private static let diskCallbacks = HelperOneShotCallbackRegistry()
     private static let diskCallbackTimeout: Duration = .seconds(60)
@@ -192,11 +191,13 @@ final class LiveWritableMountSystem: WritableMountSystem, @unchecked Sendable {
         guard Self.satisfiesPinnedSignature(driver, identifier: Self.driverIdentifier),
               Self.satisfiesPinnedSignature(probe, identifier: Self.probeIdentifier)
         else { return false }
-        switch await Self.runtimeProbe.run(system: LiveRuntimeProbeSystem(system: self, helpersDirectory: helpersDirectory)) {
-        case .ready: return true
-        case .unavailable: return false
-        case .unresolved: return nil
-        }
+        // FSKit module selection is per user. Ask the same fixed UID that will
+        // own the mount, before removing the native read-only mount.
+        guard let result = await runAsMountUser(
+            .fsKitReady, mountPoint: MountUserAgent.fsKitCheckPlaceholder,
+            timeout: .seconds(5)
+        ) else { return nil }
+        return result.status == 0
     }
 
     func healthIsClean(bsdName bsd: String) async -> Bool? {
@@ -493,17 +494,16 @@ extension LiveWritableMountSystem: DiskReleaseSystem {
 
     func ownedFSKitMounts(devicePath: String) async -> [HelperOwnedMount]? {
         let driverPath = helpersDirectory.appendingPathComponent("ntfs-3g").resolvingSymlinksInPath().path
-        guard let pids = Self.stableProcessIDs() else { return nil }
+        guard let pids = Self.stableProcessIDs() else { print("[D-LITE] processInventoryUnsettled"); return nil }
         var owned: [HelperOwnedMount] = []
         for pid in pids {
             var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
             let pathLength = proc_pidpath(pid, &path, UInt32(path.count))
             if pathLength <= 0 {
-                let pathError = errno
+                print("[D-LITE] unreadableProcess pid=\(pid) pathErrno=\(errno)")
                 let status = kill(pid, 0)
-                let code = status == 0 ? 0 : errno
-                let zombie = pathError == ESRCH && status == 0 ? Self.confirmedZombie(pid: pid) : nil
-                guard HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(errno: code, confirmedZombie: zombie) else {
+                let code = errno
+                guard status != 0, HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(errno: code) else {
                     return nil
                 }
                 continue
@@ -585,17 +585,16 @@ extension LiveWritableMountSystem: DiskReleaseSystem {
     func orphanedMounts(diskBSDName disk: String) async -> [HelperOwnedMount]? {
         guard disk.range(of: #"^disk[0-9]+$"#, options: .regularExpression) != nil else { return nil }
         let driverPath = helpersDirectory.appendingPathComponent("ntfs-3g").resolvingSymlinksInPath().path
-        guard let pids = Self.stableProcessIDs() else { return nil }
+        guard let pids = Self.stableProcessIDs() else { print("[D-LITE] processInventoryUnsettled"); return nil }
         var orphans: [HelperOwnedMount] = []
         for pid in pids {
             var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
             let pathLength = proc_pidpath(pid, &path, UInt32(path.count))
             if pathLength <= 0 {
-                let pathError = errno
+                print("[D-LITE] unreadableProcess pid=\(pid) pathErrno=\(errno)")
                 let status = kill(pid, 0)
-                let code = status == 0 ? 0 : errno
-                let zombie = pathError == ESRCH && status == 0 ? Self.confirmedZombie(pid: pid) : nil
-                guard HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(errno: code, confirmedZombie: zombie) else {
+                let code = errno
+                guard status != 0, HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(errno: code) else {
                     return nil
                 }
                 continue
@@ -664,17 +663,6 @@ extension LiveWritableMountSystem: DiskReleaseSystem {
         return entryIDs
     }
 
-    /// kill(pid, 0) also succeeds for an exited, unreaped zombie. Only a complete
-    /// kernel BSD-info read for this exact PID can distinguish it from an unreadable live process.
-    private static func confirmedZombie(pid: pid_t) -> Bool? {
-        var info = proc_bsdinfo()
-        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
-        // Nonzero arg includes zombies in PROC_PIDTBSDINFO (Apple XNU proc_info.c).
-        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 1, &info, size) == size,
-              info.pbi_pid == UInt32(pid) else { return nil }
-        return info.pbi_status == UInt32(SZOMB)
-    }
-
     private static func stableProcessIDs() -> [pid_t]? {
         HelperProcessInventorySettlement.settled {
             let estimate = proc_listallpids(nil, 0)
@@ -683,6 +671,7 @@ extension LiveWritableMountSystem: DiskReleaseSystem {
             var pids = [pid_t](repeating: 0, count: capacity)
             let returned = proc_listallpids(&pids, Int32(capacity * MemoryLayout<pid_t>.stride))
             guard returned > 0 else { return nil }
+            print("[D-LITE] processSample count=\(returned) capacity=\(capacity)")
             return HelperProcessInventorySample(
                 reportedCount: Int(returned), capacity: capacity, processIDs: pids
             )

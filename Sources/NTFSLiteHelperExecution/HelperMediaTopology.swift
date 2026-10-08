@@ -106,8 +106,8 @@ public enum HelperProcessInventorySettlement {
 }
 
 public enum HelperProcessInspectionPolicy {
-    public static func mayIgnoreUnreadableProcess(errno code: Int32) -> Bool {
-        code == ESRCH
+    public static func mayIgnoreUnreadableProcess(errno code: Int32, confirmedZombie: Bool? = nil) -> Bool {
+        code == ESRCH || (code == 0 && confirmedZombie == true)
     }
 }
 

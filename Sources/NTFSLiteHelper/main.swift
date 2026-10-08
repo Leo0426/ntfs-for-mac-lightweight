@@ -27,12 +27,31 @@ if isMountUserAgent {
 
 let system = LiveWritableMountSystem()
 
+// Fixed root-only diagnostic of the same image proof, no disk/path/parameter arguments.
+if CommandLine.arguments == [CommandLine.arguments[0], "--verify-runtime"] {
+    guard let system else { exit(99) }
+    Task {
+        let ready = await system.fsKitRuntimeReady()
+        print(ready == true ? "runtimeProbe=ready" : ready == false ? "runtimeProbe=unavailable" : "runtimeProbe=unresolved")
+        fflush(stdout)
+        if ready != nil { exit(ready == true ? 0 : 1) }
+        // Unknown resources stay owned; do not exit or kill a pending driver/unmount.
+    }
+    dispatchMain()
+}
+guard CommandLine.arguments.count == 1 else { exit(64) }
+
 /// Only admitted requests arrive here; an action/target mismatch fails closed.
 let processor = HelperRequestProcessor { request in
     // The daemon may outlive an app update. Recheck before every mutation;
     // a missing or changed deployment cannot reuse an earlier decision.
     guard deploymentIsTrusted(requireRootProcess: true) else {
         return HelperResponseEnvelope(resultCode: .executionFailed, exitStatus: 97)
+    }
+    guard await !LiveWritableMountSystem.runtimeProbe.isHoldingResources(
+        persistentQualification: LiveRuntimeProbeSystem.persistentQualification()
+    ) else {
+        return HelperResponseEnvelope(resultCode: .rejectedDiskBusy, exitStatus: 0)
     }
     switch (request.action, request.target) {
     case let (.mountReadWrite, .volume(target)):
@@ -70,7 +89,10 @@ final class IdleExit: @unchecked Sendable {
             Task {
                 // A timed-out DA operation or unconfirmed child may still act
                 // after its XPC response. Keep the process-scoped disk lease.
-                guard await !processor.hasFrozenDisk() else { return }
+                guard await !processor.hasFrozenDisk(),
+                      await !LiveWritableMountSystem.runtimeProbe.isHoldingResources(
+                        persistentQualification: LiveRuntimeProbeSystem.persistentQualification()
+                      ) else { return }
                 if gate.beginExitIfIdle(idleSeconds: idleSeconds) { exit(0) }
             }
         }

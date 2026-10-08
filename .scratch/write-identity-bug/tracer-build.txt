@@ -1,0 +1,17 @@
+Building for production...
+[1 / 25]
+Build complete! (0.33 sec)
+Building for production...
+Build complete! (0.18 sec)
+Building for production...
+[Planning deferred tasks]
+[1 / 14]
+Build complete! (0.42 sec)
+/var/folders/9p/_bljh5tx6zl_t27699f0dyfm0000gn/T//ntfs-lite-tracer.iBqjtq/NTFSLiteHelperTracer.app/Contents/Info.plist: OK
+/var/folders/9p/_bljh5tx6zl_t27699f0dyfm0000gn/T//ntfs-lite-tracer.iBqjtq/NTFSLiteHelperTracer.app/Contents/Library/LaunchDaemons/com.leolu.ntfslite.helper.v2.plist: OK
+/var/folders/9p/_bljh5tx6zl_t27699f0dyfm0000gn/T//ntfs-lite-tracer.iBqjtq/NTFSLiteHelperTracer.app/Contents/Helpers/ntfs-3g: replacing existing signature
+/var/folders/9p/_bljh5tx6zl_t27699f0dyfm0000gn/T//ntfs-lite-tracer.iBqjtq/NTFSLiteHelperTracer.app/Contents/Helpers/ntfs-3g.probe: replacing existing signature
+/var/folders/9p/_bljh5tx6zl_t27699f0dyfm0000gn/T//ntfs-lite-tracer.iBqjtq/NTFSLiteHelperTracer.app/Contents/MacOS/NTFSLiteHelper: replacing existing signature
+/var/folders/9p/_bljh5tx6zl_t27699f0dyfm0000gn/T//ntfs-lite-tracer.iBqjtq/NTFSLiteHelperTracer.app/Contents/MacOS/NTFSLiteHelperTracer: replacing existing signature
+/var/folders/9p/_bljh5tx6zl_t27699f0dyfm0000gn/T//ntfs-lite-tracer.iBqjtq/NTFSLiteHelperTracer.app: replacing existing signature
+/Users/heyonepiece/Projects/chatgpt_worktrees/protected-helper-install/ntfs-for-mac-lightweight/.build/NTFSLiteHelperTracer.app
