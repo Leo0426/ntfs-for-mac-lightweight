@@ -1,6 +1,6 @@
 # 受保护更新到 0.1.5（6）
 
-日期：2026-10-08（Asia/Shanghai）。状态：待安装。
+日期：2026-10-08（Asia/Shanghai）。状态：已安装，v2 注册与 XPC 核验待完成。
 
 ## 已完成
 
@@ -17,3 +17,12 @@
 
 用户报告已执行脚本，但随后只读复核：安装件仍为 0.1.3（4）、修改时间未变，没有新的 root 暂存或回退
 目录，也没有维护锁。脚本在变更前退出或未以 root 运行；失败原因待取得原始输出，不推断为安全或成功。
+
+## 重跑结果
+
+用户在自己的终端重跑，脚本输出 Installer `The upgrade was successful` 与 0.1.5（6）的 PASS；回退件为 root-only
+`/private/var/tmp/ntfslite-maintenance-t51n1_pu/previous-NTFSLite.app`（0.1.3（4），13:24:49 创建）。
+
+随后独立只读复核：版本 0.1.5（6），9 个文件摘要与 `package-metadata.json` 一致，整树 root:wheel、无组/其他可写、
+无 ACL 或链接，App 与 helper 固定签名通过；维护锁已释放，v2 未注册，无 App/helper/驱动进程或 FSKit/macFUSE 挂载。
+本次未注册服务，也未操作任何磁盘。
