@@ -1,0 +1,17 @@
+{
+  "version": "0.1.5",
+  "build": "6",
+  "packageSHA256": "083acabdd14a3d1f92b66f7e7122e392a700340afec56bafd221b32aae4f9cc8",
+  "packageBytes": 4493823,
+  "appFiles": {
+    "Contents/Info.plist": "f7168b4dc724c1ea08289eac6e317c5d621b249438b56cdd1080e01616fd45f1",
+    "Contents/_CodeSignature/CodeResources": "877336cf3070c6100c78f2efa77b59b13f3a1bf82a517202a21c3b780b8a4ea4",
+    "Contents/MacOS/NTFSLiteHelper": "c2518418695e133498edc58fd53da3aa3e3016ef3952814fd24847a389d48d05",
+    "Contents/MacOS/NTFSLiteReadOnlyApp": "116b7792871e9a261803376b744ac6d372e5f1bbc3a1dcb7d5619539a9f43690",
+    "Contents/Resources/NTFSLite.icns": "316966680d7835d000d61cfc0872c4de1a3654562b6b54c8bab848018d7d259d",
+    "Contents/Resources/FSKitRuntimeProbe.ntfs.zlib": "bc13f484e9bc508733246b1bc2145068041b883a5eaad32273106d54c09d7c34",
+    "Contents/Library/LaunchDaemons/com.leolu.ntfslite.helper.v2.plist": "61b68feb490ad1fc8339d96270336ffeed1c37ff1689ad97fe62af295cd0fe66",
+    "Contents/Helpers/ntfs-3g.probe": "ebe36ec4399ba55084a7df608f2eb580694c09ecac74015095f0bd8a2991c714",
+    "Contents/Helpers/ntfs-3g": "085279e4f4238cb2b96164568feb4f5f4c8c7b64f6166e0ab331f5e1fb8a81b9"
+  }
+}
