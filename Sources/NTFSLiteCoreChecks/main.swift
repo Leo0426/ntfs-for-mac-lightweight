@@ -18200,24 +18200,46 @@ func diskReleaseExecutorUsesOnlyStandardReleaseAndFailsClosed() async {
 await diskReleaseExecutorUsesOnlyStandardReleaseAndFailsClosed()
 print("PASS: helper unmount and eject use standard release only, await drivers and confirm removal")
 
+/// `send` runs off the checker's task, so every field is read and written under the lock.
 final class FakeHelperTransport: HelperTransport, @unchecked Sendable {
-    var replies: [HelperTransportResult]
-    var actions: [String] = []
-    var operationIDs: [String] = []
-    var gate: CheckedContinuation<Void, Never>?
-    var holdFirst = false
+    private let lock = NSLock()
+    private var replies: [HelperTransportResult]
+    private var recordedActions: [String] = []
+    private var recordedOperationIDs: [String] = []
+    private var holdsFirst: Bool
+    private var gate: CheckedContinuation<Void, Never>?
 
-    init(_ replies: [HelperTransportResult]) { self.replies = replies }
+    init(_ replies: [HelperTransportResult], holdFirst: Bool = false) {
+        self.replies = replies
+        holdsFirst = holdFirst
+    }
+
+    var actions: [String] { lock.withLock { recordedActions } }
+    var operationIDs: [String] { lock.withLock { recordedOperationIDs } }
+    var isHoldingFirst: Bool { lock.withLock { gate != nil } }
+
+    func releaseFirst() {
+        let held = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            defer { gate = nil }
+            return gate
+        }
+        held?.resume()
+    }
 
     func send(_ request: Data) async -> HelperTransportResult {
         let object = (try? JSONSerialization.jsonObject(with: request)) as? [String: Any]
-        actions.append(object?["action"] as? String ?? "?")
-        operationIDs.append(object?["operationID"] as? String ?? "?")
-        if holdFirst {
-            holdFirst = false
-            await withCheckedContinuation { gate = $0 }
+        let hold = lock.withLock { () -> Bool in
+            recordedActions.append(object?["action"] as? String ?? "?")
+            recordedOperationIDs.append(object?["operationID"] as? String ?? "?")
+            defer { holdsFirst = false }
+            return holdsFirst
         }
-        return replies.isEmpty ? .unavailable : replies.removeFirst()
+        if hold {
+            await withCheckedContinuation { continuation in
+                lock.withLock { gate = continuation }
+            }
+        }
+        return lock.withLock { replies.isEmpty ? .unavailable : replies.removeFirst() }
     }
 }
 
@@ -18364,13 +18386,14 @@ func writeSessionSendsOnlyConfirmedExclusiveFixedRequests() async {
     _ = await session.enableWriting(volume, in: observation, confirmedAsDataVolume: true)
     expect(Set(transport.operationIDs).count == 2, "every request carries a fresh one-shot operation ID")
 
-    let busyTransport = FakeHelperTransport([helperReply(.succeeded, 0), helperReply(.succeeded, 0)])
-    busyTransport.holdFirst = true
+    let busyTransport = FakeHelperTransport(
+        [helperReply(.succeeded, 0), helperReply(.succeeded, 0)], holdFirst: true
+    )
     let busySession = WriteSession(transport: busyTransport)
     let first = Task { await busySession.enableWriting(volume, in: observation, confirmedAsDataVolume: true) }
-    while busyTransport.gate == nil { await Task.yield() }
+    while !busyTransport.isHoldingFirst { await Task.yield() }
     let second = await busySession.safeEject(volume.diskInstanceID, in: observation)
-    busyTransport.gate?.resume()
+    busyTransport.releaseFirst()
     _ = await first.value
     expect(second == .refused(.diskBusy) && busyTransport.actions == ["mountReadWrite"],
            "a second operation on the same disk must be refused while one is running")
