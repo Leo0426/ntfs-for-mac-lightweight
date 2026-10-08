@@ -1,6 +1,6 @@
 # 彻底移除受保护安装（2026-10-08）
 
-状态：文件、launchd 任务、安装收据与 LaunchServices 登记已清除；BTM 记录待用户 `sfltool resetbtm`。
+状态：已全部清除，重启后复核通过。
 
 ## 背景
 
@@ -47,3 +47,14 @@
 剩余：BTM 记录没有逐条删除的接口，需要用户以 root 执行 `sfltool resetbtm` 并重启（这会重置所有 App 的
 后台项批准）。launchd disabled 覆盖表中的 v1/v2 键也会保留，没有可用的删除接口；它只是在服务加载时
 提供启用标记，对其他服务没有影响。
+
+## BTM 重置、launchd 覆盖表与重启复核
+
+用户执行 `sudo sfltool resetbtm`（输出 `Database reset.`），只读复核 BTM 中已无 `leolu`/`NTFSLite`。
+`.build/NTFSLite-local.pkg` 已移入废纸篓。用户备份 launchd `disabled.plist` 后，用 PlistBuddy 删除
+`com.leolu.ntfslite.helper` 与 `.helper.v2` 两个键；与备份对比，差异只有这两个键。随后 16:51 重启。
+
+重启后只读复核（16:52）：`disabled.plist` 与 `launchctl print-disabled system` 中都没有 `leolu`；BTM 中没有
+`leolu`/`NTFSLite`；LaunchServices 中没有 `com.leolu.ntfslite*` 标识或 `NTFSLite` 路径；受保护 App、维护/诊断目录、
+探针目录、安装收据都不存在；没有相关进程。备份 `~/disabled.plist.bak` 已移入废纸篓。重装时须先运行
+`scripts/build-local-installer.sh` 重新构建，再做首次安装。
