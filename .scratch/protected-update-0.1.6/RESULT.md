@@ -1,6 +1,6 @@
 # 受保护更新到 0.1.6（7）
 
-日期：2026-10-08（Asia/Shanghai）。状态：安装包已构建；等待用户先在系统设置关闭后台项，再执行更新。
+日期：2026-10-08（Asia/Shanghai）。状态：已安装 0.1.6（7）；待在 App 内恢复 helper。
 
 ## 变更
 
@@ -38,3 +38,13 @@ Disposition，且含 `disabled` 或 `disallowed`。launchd 查无服务、无相
 这几项检查照旧。这偏离了 ADR 0012“更新前先注销”的要求，理由是：已不允许运行的记录不能被 launchd 启动，
 而注销入口只能随本次更新到位。安装后由 0.1.6 的“重新注册帮助程序”补做注销与重新注册。
 对当前 BTM 的只读试算显示，两条记录都满足放宽后的条件。
+
+## 重跑结果
+
+用户重跑后，Installer 输出 `The upgrade was successful`，脚本输出 0.1.6（7）的 PASS。旧版本备份在 root-only 的
+`/private/var/tmp/ntfslite-maintenance-c7ns5nzn/previous-NTFSLite.app`（0.1.5（6））。
+
+独立只读复核：版本 0.1.6（7）；9 个文件摘要与 `package-metadata.json` 一致；整树 root:wheel，无组/其他可写，
+无链接；固定签名要求通过；维护锁已释放；launchd 中无 v2；无 App/helper/驱动进程。BTM：v1 为
+`[disabled, disallowed]`，v2 为 `[enabled, disallowed]`，UID 501 容器指向受保护路径，仍无内嵌项。
+本次未操作任何磁盘。
