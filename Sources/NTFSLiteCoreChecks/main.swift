@@ -11287,6 +11287,35 @@ func helperNotFoundCanBeRetriedOnlyByExplicitRegistration() {
 helperNotFoundCanBeRetriedOnlyByExplicitRegistration()
 print("PASS: helper notFound offers manual registration while remaining closed")
 
+func helperUnreachableOffersOnlyGuardedReregistration() {
+    expect(HelperServiceState.unreachable.canAttemptReregistration
+           && !HelperServiceState.unreachable.canAttemptRegistration,
+           "an enabled but unreachable helper must offer re-registration, not plain registration")
+    let others: [HelperServiceState] = [
+        .enabled, .checkingConnection, .requiresApproval, .notRegistered, .notFound,
+        .requiresProtectedInstallation, .unavailable,
+    ]
+    expect(others.allSatisfy { !$0.canAttemptReregistration },
+           "only the enabled-but-unreachable state may offer re-registration")
+    expect(HelperServiceState.unreachable.text.contains("当前不提供磁盘操作"),
+           "the unreachable state must stay closed for disk operations")
+    expect(HelperReregistrationPolicy.mayProceed(
+        state: .unreachable, systemReportsEnabled: true, hasBusyDisk: false
+    ), "an idle, enabled-but-unreachable helper may be re-registered")
+    expect(!HelperReregistrationPolicy.mayProceed(
+        state: .unreachable, systemReportsEnabled: true, hasBusyDisk: true
+    ), "re-registration must wait while a disk operation is in progress")
+    expect(!HelperReregistrationPolicy.mayProceed(
+        state: .unreachable, systemReportsEnabled: false, hasBusyDisk: false
+    ), "re-registration requires the system to still report the service as enabled")
+    expect(!HelperReregistrationPolicy.mayProceed(
+        state: .unavailable, systemReportsEnabled: true, hasBusyDisk: false
+    ), "an unknown or untrusted state must not unregister the helper")
+}
+
+helperUnreachableOffersOnlyGuardedReregistration()
+print("PASS: helper unreachable offers only guarded re-registration")
+
 func helperRegistrationErrorsExposeCodesWithoutArbitraryPaths() {
     let known = HelperRegistrationDiagnostic.suffix(
         domain: "com.apple.ServiceManagement", code: 5

@@ -7,10 +7,16 @@ public enum HelperServiceState: Equatable, Sendable {
     case notRegistered
     case notFound
     case requiresProtectedInstallation
+    /// The system reports the service as enabled, but the signed XPC health check failed.
+    case unreachable
     case unavailable
 
     public var canAttemptRegistration: Bool {
         self == .notRegistered || self == .notFound
+    }
+
+    public var canAttemptReregistration: Bool {
+        self == .unreachable
     }
 
     public var text: String {
@@ -21,8 +27,19 @@ public enum HelperServiceState: Equatable, Sendable {
         case .notRegistered: "帮助程序尚未启用。启用后可由它执行固定的挂载与推出操作。"
         case .notFound: "系统未找到帮助程序服务（SMAppService: notFound）。可以尝试注册；当前不提供磁盘操作。"
         case .requiresProtectedInstallation: "当前应用未从受保护位置启动。请先安装本机安装包，再打开已安装的应用启用帮助程序。"
+        case .unreachable: "系统显示帮助程序已启用，但签名 XPC 连接未通过，当前不提供磁盘操作。可以重新注册帮助程序，让系统重建后台项记录。"
         case .unavailable: "帮助程序连接或状态无法确认，当前不提供磁盘操作。请重新检查。"
         }
+    }
+}
+
+/// Re-registration unregisters the system service before registering it again, so it is
+/// offered only for an idle helper that the system still reports as enabled.
+public enum HelperReregistrationPolicy {
+    public static func mayProceed(
+        state: HelperServiceState, systemReportsEnabled: Bool, hasBusyDisk: Bool
+    ) -> Bool {
+        state.canAttemptReregistration && systemReportsEnabled && !hasBusyDisk
     }
 }
 

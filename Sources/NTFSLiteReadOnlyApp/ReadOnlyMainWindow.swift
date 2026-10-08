@@ -655,6 +655,7 @@ private struct ReadOnlySetupDetail: View {
     @AccessibilityFocusState private var focusedSetupGroupID: SetupRequirementGroupID?
     @State private var actionFeedback: ReadOnlyActionFeedback?
     @State private var isAwaitingRecheckResult = false
+    @State private var isConfirmingHelperReregistration = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
@@ -689,6 +690,12 @@ private struct ReadOnlySetupDetail: View {
                         store.writeController.openHelperApprovalSettings()
                     }
                     .buttonStyle(.borderedProminent)
+                } else if store.writeController.helperState.canAttemptReregistration {
+                    Button("重新注册帮助程序") {
+                        isConfirmingHelperReregistration = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(store.writeController.isReregisteringHelper)
                 }
                 Button("重新检查帮助程序") {
                     store.writeController.refreshHelperState()
@@ -697,6 +704,17 @@ private struct ReadOnlySetupDetail: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .surfacePanel()
+            .confirmationDialog("重新注册帮助程序？", isPresented: $isConfirmingHelperReregistration) {
+                Button("重新注册") {
+                    store.writeController.reregisterHelper()
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("这会先注销后台帮助程序并等待系统完成，再重新注册。不会操作任何磁盘；之后可能需要在“系统设置 → 通用 → 登录项与扩展”中重新允许。")
+            }
+            .onChange(of: store.writeController.helperState) { _, newState in
+                if !newState.canAttemptReregistration { isConfirmingHelperReregistration = false }
+            }
 
             VStack(alignment: .leading, spacing: 12) {
                 HStack {

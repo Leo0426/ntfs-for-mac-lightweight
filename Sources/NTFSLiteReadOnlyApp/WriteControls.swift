@@ -139,6 +139,7 @@ final class WriteController: ObservableObject {
     @Published private(set) var lastMessage: String?
     @Published private(set) var recentNotices: [WriteNotice] = []
     @Published private(set) var helperMessage: String?
+    @Published private(set) var isReregisteringHelper = false
     @Published private(set) var lastOutcomeByDisk: [DiskInstanceID: WriteOutcome] = [:]
 
     private let session = WriteSession(transport: HelperXPCTransport())
@@ -201,7 +202,7 @@ final class WriteController: ObservableObject {
                 }
                 switch service.status {
                 case .enabled:
-                    helperState = reachable ? .enabled : .unavailable
+                    helperState = reachable ? .enabled : .unreachable
                     if reachable { helperMessage = nil }
                 case .requiresApproval:
                     helperState = .requiresApproval
@@ -260,6 +261,67 @@ final class WriteController: ObservableObject {
         refreshHelperState()
         if helperState == .requiresApproval {
             SMAppService.openSystemSettingsLoginItems()
+        }
+    }
+
+    /// Unregisters the enabled-but-unreachable service, waits for the system to finish, and
+    /// registers it again so Background Task Management rebuilds its records for this bundle.
+    func reregisterHelper() {
+        guard HelperEnablementUI.shouldOfferRegistration(for: Bundle.main.bundleURL) else {
+            helperState = .requiresProtectedInstallation
+            return
+        }
+        guard protectedInstallationIsTrusted() else {
+            helperState = .unavailable
+            helperMessage = "受保护安装件的属主、权限、文件清单或签名无法核验；不能重新注册帮助程序。"
+            return
+        }
+        guard !isReregisteringHelper,
+              HelperReregistrationPolicy.mayProceed(
+                  state: helperState,
+                  systemReportsEnabled: service.status == .enabled,
+                  hasBusyDisk: !busyDisks.isEmpty
+              ) else {
+            refreshHelperState()
+            return
+        }
+        isReregisteringHelper = true
+        helperCheckToken = UUID()
+        helperState = .unavailable
+        helperMessage = "正在注销并重新注册帮助程序，请稍候。"
+        Task { @MainActor in
+            defer { isReregisteringHelper = false }
+            do {
+                try await service.unregister()
+            } catch {
+                let failure = error as NSError
+                helperMessage = "帮助程序注销未完成，未重新注册。请重新检查状态。"
+                    + HelperRegistrationDiagnostic.suffix(domain: failure.domain, code: failure.code)
+                refreshHelperState()
+                return
+            }
+            guard protectedInstallationIsTrusted() else {
+                helperState = .unavailable
+                helperMessage = "帮助程序已注销，但受保护安装件已无法核验；未重新注册。"
+                return
+            }
+            guard service.status == .notRegistered || service.status == .notFound else {
+                helperMessage = "帮助程序注销后系统状态无法确认，未重新注册。请重新检查。"
+                refreshHelperState()
+                return
+            }
+            helperMessage = nil
+            do {
+                try service.register()
+            } catch {
+                let failure = error as NSError
+                helperMessage = "帮助程序已注销，但重新注册未完成。请重新检查状态与系统批准。"
+                    + HelperRegistrationDiagnostic.suffix(domain: failure.domain, code: failure.code)
+            }
+            refreshHelperState()
+            if helperState == .requiresApproval {
+                SMAppService.openSystemSettingsLoginItems()
+            }
         }
     }
 
