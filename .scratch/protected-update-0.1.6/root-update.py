@@ -26,7 +26,12 @@ def idle():
  btm=run(['/usr/bin/sfltool','dumpbtm'])
  for block in btm.split('\n\n'):
   if 'Identifier: 16.com.leolu.ntfslite.helper' in block:
-   assert 'Disposition: [disabled,' in block,'service background record enabled/unknown'
+   # 0.1.6 only: 0.1.5 cannot unregister itself, so a record the user disallowed in System
+   # Settings also counts as idle; launchd absence and the process checks above still apply.
+   rows=[r.strip() for r in block.splitlines() if r.strip().startswith('Disposition: [')]
+   assert len(rows)==1,'service background record disposition unknown'
+   flags=[x.strip() for x in rows[0].split('[',1)[1].split(']',1)[0].split(',')]
+   assert 'disabled' in flags or 'disallowed' in flags,'service background record enabled/unknown'
 assert os.geteuid()==0
 for parent in (Path('/'),Path('/Library'),ROOT):
  s=parent.lstat()
