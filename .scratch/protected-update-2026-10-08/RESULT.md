@@ -1,6 +1,6 @@
 # 受保护更新到 0.1.5（6）
 
-日期：2026-10-08（Asia/Shanghai）。状态：已安装，v2 注册与 XPC 核验待完成。
+日期：2026-10-08（Asia/Shanghai）。状态：已安装；v2 已注册但 helper 无法启动，阻塞。
 
 ## 已完成
 
@@ -26,3 +26,21 @@
 随后独立只读复核：版本 0.1.5（6），9 个文件摘要与 `package-metadata.json` 一致，整树 root:wheel、无组/其他可写、
 无 ACL 或链接，App 与 helper 固定签名通过；维护锁已释放，v2 未注册，无 App/helper/驱动进程或 FSKit/macFUSE 挂载。
 本次未注册服务，也未操作任何磁盘。
+
+## v2 注册后 helper 无法启动
+
+13:26:19 打开受保护 App，SMAppService status 0（notRegistered）。13:26:30 用户点击启用：BTM `registerLaunchItem`
+复用 0.1.3 时期的既有记录 `4A742151…`（此前 disposition disabled），launchd `Submit job succeeded`，status 变为 1
+（enabled）。随后 BTM 对 v2 与旧 v1 记录均报 `no container item`，`effectiveDisposition` 报
+`FATAL ERROR - fullPath is nil, container=(null)`；launchd 每次按需启动都报
+`The specified path is not a bundle: Contents/MacOS/NTFSLiteHelper` 并置为 inactive。plist 无 KeepAlive，App
+挂起的 XPC 连接使 launchd 约每 10 秒重试。App 显示 `.unavailable`，未开放磁盘操作，属预期失败关闭。
+
+只读复核：同一核验函数 `SecureHelperDeployment.verifyInstalled` 对安装件返回 true；LaunchServices 已于 13:26
+登记 `/Library/PrivilegedHelperTools/NTFSLite.app`（版本 6）。另有 4 个 `.build/` 下用户可写包使用相同标识符
+`com.leolu.ntfslite.readonly`，其中 `.build/NTFSLite.app` 同为版本 6；helper 启动时核对自身受保护路径，误关联也会
+失败关闭。
+
+推断（未证实）：BTM 记录原先关联的 App 容器随旧包移入回退目录而失效，复用记录时没有重建到新包的关联。
+2026-09-30 更新到 0.1.3 时同类流程成功，差异未查明。App 没有注销入口；不使用 `sfltool resetbtm`（全局重置所有
+登录项批准）。下一步：退出 App 停止重试，重启让 BTM 重新解析，再在运行环境页重新检查。
