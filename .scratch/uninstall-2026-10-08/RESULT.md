@@ -1,6 +1,6 @@
 # 彻底移除受保护安装（2026-10-08）
 
-状态：文件、launchd 任务与安装收据已移除；BTM 记录与 LaunchServices 登记尚有残留。
+状态：文件、launchd 任务、安装收据与 LaunchServices 登记已清除；BTM 记录待用户 `sfltool resetbtm`。
 
 ## 背景
 
@@ -36,3 +36,14 @@
 - LaunchServices：仍登记着已删除的受保护路径，以及 `.build/` 下的 4 个开发副本。
 
 下一步：注销 LaunchServices 中的开发副本和失效路径，然后重启，复核 BTM 是否自行清理。
+
+## 清理开发副本与 LaunchServices
+
+用户要求全部删除。`.build/` 下 4 个 App 副本（`NTFSLite`、`NTFSLiteHelperTracer`、`NTFSLiteReadOnlyApp`、
+`NTFSLiteScenarioPrototype`）已用 `/usr/bin/trash` 移入废纸篓（可恢复，未硬删）。用 `lsregister -u` 注销了
+受保护路径、原 `.build` 路径和废纸篓中的路径；复核时 LaunchServices 已无 `com.leolu.ntfslite*` 标识或
+`NTFSLite` 路径。`.build/NTFSLite-local.pkg` 保留，作为重装来源。
+
+剩余：BTM 记录没有逐条删除的接口，需要用户以 root 执行 `sfltool resetbtm` 并重启（这会重置所有 App 的
+后台项批准）。launchd disabled 覆盖表中的 v1/v2 键也会保留，没有可用的删除接口；它只是在服务加载时
+提供启用标记，对其他服务没有影响。
