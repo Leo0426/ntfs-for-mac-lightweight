@@ -149,7 +149,9 @@ public enum TrustedBundleVersionReader {
             openat(
                 contentsDescriptor,
                 pointer,
-                O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+                // Reject special files with fstat before any read. A FIFO
+                // must not block setup while waiting for a writer.
+                O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW
             )
         }
         guard infoDescriptor >= 0 else {

@@ -488,12 +488,18 @@ private struct ReadOnlyOverview: View {
                     .frame(width: 44)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 7) {
-                    Text(dashboard.title)
+                    Text(writeController.overviewExplanation(for: dashboard).title)
                         .font(.title2.weight(.semibold))
                         .fixedSize(horizontal: false, vertical: true)
-                    Text(dashboard.detail)
+                    Text(writeController.overviewExplanation(for: dashboard).detail)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                    if !writeController.sessionVolumes.isEmpty {
+                        Text("已保留本次会话的操作记录。原生只读分区可能不再列出，请查看下方会话记录与当前可用操作；记录本身不代表当前挂载状态已确认。")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     if dashboard.phase == .scanning {
                         ProgressView("正在读取系统磁盘信息")
                             .padding(.top, 4)
@@ -699,6 +705,7 @@ private struct ReadOnlySetupDetail: View {
                 }
                 Button("重新检查帮助程序") {
                     store.writeController.refreshHelperState()
+                    store.refreshSetup()
                 }
                 .buttonStyle(.bordered)
             }
@@ -714,6 +721,10 @@ private struct ReadOnlySetupDetail: View {
             }
             .onChange(of: store.writeController.helperState) { _, newState in
                 if !newState.canAttemptReregistration { isConfirmingHelperReregistration = false }
+                if newState == .enabled {
+                    // Re-read current diagnostic evidence; never restore a cached grant.
+                    store.refreshSetup()
+                }
             }
 
             VStack(alignment: .leading, spacing: 12) {
@@ -896,7 +907,7 @@ private struct ReadOnlySetupDetail: View {
             return .green
         case .actionRequired:
             return .orange
-        case .checking:
+        case .checking, .informational:
             return .secondary
         }
     }
@@ -906,6 +917,7 @@ private struct ReadOnlySetupDetail: View {
         case .satisfied: "checkmark.circle.fill"
         case .actionRequired: "exclamationmark.circle.fill"
         case .checking: "circle.dotted"
+        case .informational: "info.circle"
         }
     }
 }

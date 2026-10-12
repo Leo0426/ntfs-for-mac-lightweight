@@ -389,6 +389,13 @@ public struct DiagnosticExitStatus: Codable, Equatable, Sendable {
     public static let launchFailed = Self(kind: .launchFailed, code: nil)
 }
 
+public enum DiagnosticResultCertainty: String, Codable, Equatable, Sendable {
+    case unchanged
+    case changedQuiescent
+    case verified
+    case unknown
+}
+
 public struct DiagnosticOperationEvent: Codable, Equatable, Sendable {
     public let target: DiagnosticTarget
     public let kind: DiagnosticOperationKind
@@ -396,6 +403,9 @@ public struct DiagnosticOperationEvent: Codable, Equatable, Sendable {
     public let result: DiagnosticResultCode
     public let exitStatus: DiagnosticExitStatus?
     public let elapsedMilliseconds: UInt64
+    public let traceID: UUID?
+    public let helperStageCode: Int32?
+    public let certainty: DiagnosticResultCertainty?
 
     public init(
         target: DiagnosticTarget,
@@ -403,7 +413,10 @@ public struct DiagnosticOperationEvent: Codable, Equatable, Sendable {
         stage: DiagnosticOperationStage,
         result: DiagnosticResultCode,
         exitStatus: DiagnosticExitStatus?,
-        elapsedMilliseconds: UInt64
+        elapsedMilliseconds: UInt64,
+        traceID: UUID? = nil,
+        helperStageCode: Int32? = nil,
+        certainty: DiagnosticResultCertainty? = nil
     ) {
         self.target = target
         self.kind = kind
@@ -411,6 +424,9 @@ public struct DiagnosticOperationEvent: Codable, Equatable, Sendable {
         self.result = result
         self.exitStatus = exitStatus
         self.elapsedMilliseconds = elapsedMilliseconds
+        self.traceID = traceID
+        self.helperStageCode = helperStageCode
+        self.certainty = certainty
     }
 }
 

@@ -2,6 +2,7 @@ import Darwin
 import DiskArbitration
 import Foundation
 import IOKit
+import OSLog
 import NTFSLiteHelperExecution
 import NTFSLiteHelperProtocol
 import NTFSLiteSystem
@@ -16,7 +17,8 @@ final class LiveWritableMountSystem: WritableMountSystem, @unchecked Sendable {
     static let driverIdentifier = "com.leolu.ntfslite.ntfs-3g"
     static let runtimeProbe = RuntimeProbeCoordinator()
     static let probeIdentifier = "com.leolu.ntfslite.ntfs-3g.probe"
-    private static let diskCallbacks = HelperOneShotCallbackRegistry()
+    private static let processLogger = Logger(subsystem: "com.leolu.ntfslite.helper", category: "process-inspection")
+    private static let diskCallbacks = HelperCallbackRegistry<HelperDiskOperationResult>(timeoutResult: .unknown)
     private static let diskCallbackTimeout: Duration = .seconds(60)
 
     private let helpersDirectory: URL
@@ -238,21 +240,25 @@ final class LiveWritableMountSystem: WritableMountSystem, @unchecked Sendable {
     }
 
     func unmountNative(bsdName bsd: String, expectedRegistryEntryID: UInt64) async -> Bool {
+        await unmountNativeResult(bsdName: bsd, expectedRegistryEntryID: expectedRegistryEntryID) == .succeeded
+    }
+
+    func unmountNativeResult(bsdName bsd: String, expectedRegistryEntryID: UInt64) async -> HelperDiskOperationResult {
         guard let disk = boundDADisk(
             bsdName: bsd, expectedRegistryEntryID: expectedRegistryEntryID, isWholeDisk: false
-        ) else { return false }
+        ) else { return .unknown }
         return await withCheckedContinuation { continuation in
             guard let token = Self.diskCallbacks.register(continuation, retainedResource: disk) else {
-                continuation.resume(returning: false)
+                continuation.resume(returning: .refused)
                 return
             }
             guard let context = UnsafeMutableRawPointer(bitPattern: token) else {
-                Self.diskCallbacks.complete(token, result: false)
+                Self.diskCallbacks.complete(token, result: .refused)
                 return
             }
             DADiskUnmount(disk, DADiskUnmountOptions(kDADiskUnmountOptionDefault), { _, dissenter, context in
                 guard let context else { return }
-                LiveWritableMountSystem.diskCallbacks.complete(UInt(bitPattern: context), result: dissenter == nil)
+                LiveWritableMountSystem.diskCallbacks.complete(UInt(bitPattern: context), result: dissenter == nil ? .succeeded : .refused)
             }, context)
             Self.scheduleDiskCallbackTimeout(token)
         }
@@ -491,6 +497,32 @@ extension LiveWritableMountSystem: DiskReleaseSystem {
         return names.filter { $0.range(of: "^\(bsd)s[0-9]+$", options: .regularExpression) != nil }.sorted()
     }
 
+    /// No persistent or reparented NTFS child may survive a service lifecycle change.
+    func isDriverFreeForMaintenance() async -> Bool {
+        guard Self.diskCallbacks.pendingCount == 0, let pids = Self.stableProcessIDs() else { return false }
+        for pid in pids {
+            var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+            let length = proc_pidpath(pid, &path, UInt32(path.count))
+            if length <= 0 {
+                let pathError = errno
+                let status = kill(pid, 0)
+                let code = status == 0 ? 0 : errno
+                let zombie = pathError == ESRCH && status == 0 ? Self.confirmedZombie(pid: pid) : nil
+                let noDevices = pathError == ENOENT && status == 0
+                    ? HelperProcessResourceReader.confirmedNoDeviceHandles(pid: pid) : nil
+                guard HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(
+                    errno: code, confirmedZombie: zombie, pathError: pathError,
+                    confirmedNoDeviceHandles: noDevices) else { return false }
+                continue
+            }
+            guard length < path.count else { return false }
+            let name = String(decoding: path.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+            guard !name.isEmpty else { return false }
+            if ["ntfs-3g", "ntfs-3g.probe"].contains((name as NSString).lastPathComponent) { return false }
+        }
+        return Self.diskCallbacks.pendingCount == 0
+    }
+
     func ownedFSKitMounts(devicePath: String) async -> [HelperOwnedMount]? {
         let driverPath = helpersDirectory.appendingPathComponent("ntfs-3g").resolvingSymlinksInPath().path
         guard let pids = Self.stableProcessIDs() else { return nil }
@@ -500,10 +532,17 @@ extension LiveWritableMountSystem: DiskReleaseSystem {
             let pathLength = proc_pidpath(pid, &path, UInt32(path.count))
             if pathLength <= 0 {
                 let pathError = errno
+                Self.processLogger.notice("process-path-unreadable")
                 let status = kill(pid, 0)
                 let code = status == 0 ? 0 : errno
                 let zombie = pathError == ESRCH && status == 0 ? Self.confirmedZombie(pid: pid) : nil
-                guard HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(errno: code, confirmedZombie: zombie) else {
+                let noDevices = pathError == ENOENT && status == 0
+                    ? HelperProcessResourceReader.confirmedNoDeviceHandles(pid: pid) : nil
+                guard HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(
+                    errno: code, confirmedZombie: zombie, pathError: pathError,
+                    confirmedNoDeviceHandles: noDevices
+                ) else {
+                    Self.processLogger.notice("resource-unverified")
                     return nil
                 }
                 continue
@@ -538,14 +577,26 @@ extension LiveWritableMountSystem: DiskReleaseSystem {
 
     func unmountFileSystem(mountPoint: String) async -> Bool {
         // Standard unmount only (no MNT_FORCE), as the user who owns the FSKit mount.
-        await runAsMountUser(.unmount, mountPoint: mountPoint)?.status == 0
+        await unmountFileSystemResult(mountPoint: mountPoint) == .succeeded
+    }
+
+    func unmountFileSystemResult(mountPoint: String) async -> HelperDiskOperationResult {
+        guard let result = await runAsMountUser(.unmount, mountPoint: mountPoint) else { return .unknown }
+        return result.status == 0 ? .succeeded : .refused
     }
 
     func waitForDriverExit(pid: Int32) async -> Bool {
+        guard pid > 0 else { return false }
         for _ in 0..<120 {
-            if kill(pid, 0) != 0 && errno == ESRCH { return true }
-            if await !driverState(pid: pid).isAlive { return true }
-            try? await Task.sleep(for: .milliseconds(250))
+            switch HelperProcessExitReader.read(pid: pid) {
+            case .exited: return true
+            case .unknown:
+                Self.processLogger.notice("driver-exit-unverified")
+                return false
+            case .alive: break
+            }
+            do { try await Task.sleep(for: .milliseconds(250)) }
+            catch { return false }
         }
         return false
     }
@@ -561,22 +612,30 @@ extension LiveWritableMountSystem: DiskReleaseSystem {
         await unmountNative(bsdName: bsdName, expectedRegistryEntryID: expectedRegistryEntryID)
     }
 
+    func unmountNativeVolumeResult(bsdName: String, expectedRegistryEntryID: UInt64) async -> HelperDiskOperationResult {
+        await unmountNativeResult(bsdName: bsdName, expectedRegistryEntryID: expectedRegistryEntryID)
+    }
+
     func eject(diskBSDName: String, expectedRegistryEntryID: UInt64) async -> Bool {
+        await ejectResult(diskBSDName: diskBSDName, expectedRegistryEntryID: expectedRegistryEntryID) == .succeeded
+    }
+
+    func ejectResult(diskBSDName: String, expectedRegistryEntryID: UInt64) async -> HelperDiskOperationResult {
         guard let disk = boundDADisk(
             bsdName: diskBSDName, expectedRegistryEntryID: expectedRegistryEntryID, isWholeDisk: true
-        ) else { return false }
+        ) else { return .unknown }
         return await withCheckedContinuation { continuation in
             guard let token = Self.diskCallbacks.register(continuation, retainedResource: disk) else {
-                continuation.resume(returning: false)
+                continuation.resume(returning: .refused)
                 return
             }
             guard let context = UnsafeMutableRawPointer(bitPattern: token) else {
-                Self.diskCallbacks.complete(token, result: false)
+                Self.diskCallbacks.complete(token, result: .refused)
                 return
             }
             DADiskEject(disk, DADiskEjectOptions(kDADiskEjectOptionDefault), { _, dissenter, context in
                 guard let context else { return }
-                LiveWritableMountSystem.diskCallbacks.complete(UInt(bitPattern: context), result: dissenter == nil)
+                LiveWritableMountSystem.diskCallbacks.complete(UInt(bitPattern: context), result: dissenter == nil ? .succeeded : .refused)
             }, context)
             Self.scheduleDiskCallbackTimeout(token)
         }
@@ -592,10 +651,17 @@ extension LiveWritableMountSystem: DiskReleaseSystem {
             let pathLength = proc_pidpath(pid, &path, UInt32(path.count))
             if pathLength <= 0 {
                 let pathError = errno
+                Self.processLogger.notice("process-path-unreadable")
                 let status = kill(pid, 0)
                 let code = status == 0 ? 0 : errno
                 let zombie = pathError == ESRCH && status == 0 ? Self.confirmedZombie(pid: pid) : nil
-                guard HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(errno: code, confirmedZombie: zombie) else {
+                let noDevices = pathError == ENOENT && status == 0
+                    ? HelperProcessResourceReader.confirmedNoDeviceHandles(pid: pid) : nil
+                guard HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(
+                    errno: code, confirmedZombie: zombie, pathError: pathError,
+                    confirmedNoDeviceHandles: noDevices
+                ) else {
+                    Self.processLogger.notice("resource-unverified")
                     return nil
                 }
                 continue
@@ -622,20 +688,27 @@ extension LiveWritableMountSystem: DiskReleaseSystem {
 
     func diskIsPresent(bsdName: String, registryEntryID: UInt64) async -> Bool? {
         guard bsdName.range(of: #"^disk[0-9]+$"#, options: .regularExpression) != nil,
-              registryEntryID > 0
-        else { return nil }
-        var info = stat()
-        if lstat("/dev/" + bsdName, &info) == 0 { return true }
-        guard errno == ENOENT,
-              let inventory = try? SystemIOMediaEnumerationReader().currentSnapshot(),
-              let registryIDs = Self.stableIOMediaEntryIDs()
-        else { return nil }
+              registryEntryID > 0 else { return nil }
         return HelperDiskPresencePolicy.isPresent(
-            deviceNodeExists: false,
-            bsdNameInRegistry: inventory.bsdNames.contains(bsdName),
-            requestedEntryInRegistry: registryIDs.contains(registryEntryID),
-            diskArbitrationHasDisk: DADiskCreateFromBSDName(kCFAllocatorDefault, session, bsdName) != nil
+            bsdName: bsdName, registryEntryID: registryEntryID,
+            first: Self.diskPresenceSnapshot(bsdName: bsdName),
+            second: Self.diskPresenceSnapshot(bsdName: bsdName)
         )
+    }
+
+    private static func diskPresenceSnapshot(bsdName: String) -> HelperDiskPresenceSnapshot? {
+        func nodeExists() -> Bool? {
+            var info = stat()
+            if lstat("/dev/" + bsdName, &info) == 0 { return true }
+            return errno == ENOENT ? false : nil
+        }
+        guard let before = nodeExists(),
+              let inventory = try? SystemIOMediaEnumerationReader().currentSnapshot(),
+              let registryIDs = stableIOMediaEntryIDs(),
+              let after = nodeExists(), before == after else { return nil }
+        return HelperDiskPresenceSnapshot(deviceNodeExists: before,
+                                          bsdNames: inventory.bsdNames,
+                                          registryEntryIDs: registryIDs)
     }
 
     private static func stableIOMediaEntryIDs() -> Set<UInt64>? {
@@ -676,17 +749,21 @@ extension LiveWritableMountSystem: DiskReleaseSystem {
     }
 
     private static func stableProcessIDs() -> [pid_t]? {
-        HelperProcessInventorySettlement.settled {
-            let estimate = proc_listallpids(nil, 0)
-            guard estimate > 0, estimate < 1_000_000 else { return nil }
-            let capacity = Int(estimate) + 64
-            var pids = [pid_t](repeating: 0, count: capacity)
-            let returned = proc_listallpids(&pids, Int32(capacity * MemoryLayout<pid_t>.stride))
-            guard returned > 0 else { return nil }
-            return HelperProcessInventorySample(
-                reportedCount: Int(returned), capacity: capacity, processIDs: pids
-            )
+        for _ in 0..<3 {
+            if let stable = HelperProcessInventorySettlement.settled(sample: {
+                let estimate = proc_listallpids(nil, 0)
+                guard estimate > 0, estimate < 1_000_000 else { return nil }
+                let capacity = Int(estimate) + 64
+                var pids = [pid_t](repeating: 0, count: capacity)
+                let returned = proc_listallpids(&pids, Int32(capacity * MemoryLayout<pid_t>.stride))
+                guard returned > 0 else { return nil }
+                return HelperProcessInventorySample(
+                    reportedCount: Int(returned), capacity: capacity, processIDs: pids
+                )
+            }) { return stable }
         }
+        processLogger.notice("process-inventory-unverified")
+        return nil
     }
 
     /// argv of a process via KERN_PROCARGS2 (argc followed by exec path and arguments).

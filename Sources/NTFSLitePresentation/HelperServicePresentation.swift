@@ -37,9 +37,11 @@ public enum HelperServiceState: Equatable, Sendable {
 /// offered only for an idle helper that the system still reports as enabled.
 public enum HelperReregistrationPolicy {
     public static func mayProceed(
-        state: HelperServiceState, systemReportsEnabled: Bool, hasBusyDisk: Bool
+        state: HelperServiceState, systemReportsEnabled: Bool, hasBusyDisk: Bool,
+        hasBoundDiskSession: Bool = false, hasFreshQuiescenceProof: Bool = false
     ) -> Bool {
         state.canAttemptReregistration && systemReportsEnabled && !hasBusyDisk
+            && !hasBoundDiskSession && hasFreshQuiescenceProof
     }
 }
 

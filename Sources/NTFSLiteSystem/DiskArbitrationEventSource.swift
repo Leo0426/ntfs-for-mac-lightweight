@@ -22,6 +22,9 @@ public struct DiskArbitrationDescription: Equatable, Sendable {
     public let mountPoint: String?
     public let roleEvidence: VolumeRoleEvidence
     public let isNetworkVolume: Bool?
+    public let ioMediaLookupReturnedObject: Bool?
+    /// Raw key presence preserves the distinction between absent and malformed physical fields.
+    public let hasPhysicalMediaDescription: Bool?
 
     public init(
         bsdName: String?,
@@ -40,7 +43,9 @@ public struct DiskArbitrationDescription: Equatable, Sendable {
         mediaContentHint: String? = nil,
         mediaRegistryID: UInt64? = nil,
         roleEvidence: VolumeRoleEvidence? = nil,
-        isNetworkVolume: Bool? = nil
+        isNetworkVolume: Bool? = nil,
+        ioMediaLookupReturnedObject: Bool? = nil,
+        hasPhysicalMediaDescription: Bool? = nil
     ) {
         self.bsdName = bsdName
         self.physicalDiskBSDName = physicalDiskBSDName
@@ -62,6 +67,8 @@ public struct DiskArbitrationDescription: Equatable, Sendable {
         // role remains unknown until a separate trusted source is introduced.
         self.roleEvidence = roleEvidence ?? (isInternal == true ? .protected : .unknown)
         self.isNetworkVolume = isNetworkVolume
+        self.ioMediaLookupReturnedObject = ioMediaLookupReturnedObject
+        self.hasPhysicalMediaDescription = hasPhysicalMediaDescription
     }
 
     public var volumeEvidence: ReadOnlyVolumeEvidence? {
@@ -106,6 +113,38 @@ public enum DiskArbitrationEventSourceError: Error, Equatable, Sendable {
 }
 
 package enum DiskArbitrationDescriptionValueDecoder {
+    package static func descriptionsAgree(_ first: [String: Any]?, _ second: [String: Any]?) -> Bool {
+        guard let first, let second, !first.isEmpty, Set(first.keys) == Set(second.keys) else { return false }
+        for key in first.keys {
+            guard let lhs = first[key], let rhs = second[key],
+                  CFGetTypeID(lhs as CFTypeRef) == CFGetTypeID(rhs as CFTypeRef)
+            else { return false }
+        }
+        guard physicalMediaPresence(in: first) != nil, physicalMediaPresence(in: second) != nil else {
+            return false
+        }
+        return NSDictionary(dictionary: first).isEqual(to: second)
+    }
+
+    package static func physicalMediaPresence(in dictionary: [String: Any]?) -> Bool? {
+        guard let dictionary, !dictionary.isEmpty else { return nil }
+        let logicalDeviceKeys: Set<String> = ["DAMediaBSDMajor", "DAMediaBSDMinor"]
+        for (key, raw) in dictionary {
+            guard logicalDeviceKeys.contains(key) else { continue }
+            let value = raw as CFTypeRef
+            guard CFGetTypeID(value) == CFNumberGetTypeID(),
+                  let number = raw as? NSNumber,
+                  !CFNumberIsFloatType(unsafeDowncast(value, to: CFNumber.self)),
+                  number.doubleValue >= 0, number.doubleValue <= Double(UInt32.max)
+            else { return nil }
+        }
+        return dictionary.keys.contains {
+            $0 == "DAVolumeUUID" ||
+            ($0.hasPrefix("DAMedia") || $0.hasPrefix("DADevice") || $0.hasPrefix("DABus"))
+                && !logicalDeviceKeys.contains($0)
+        }
+    }
+
     package static func boolean(_ rawValue: Any?) -> Bool? {
         guard let rawValue else {
             return nil
@@ -307,7 +346,8 @@ private final class DiskArbitrationStreamController: @unchecked Sendable {
     }
 
     private static func copyDescription(of disk: DADisk) -> DiskArbitrationDescription {
-        let dictionary = DADiskCopyDescription(disk) as? [String: Any] ?? [:]
+        let rawDictionary = DADiskCopyDescription(disk) as? [String: Any]
+        let dictionary = rawDictionary ?? [:]
         let bsdName = DADiskGetBSDName(disk).map(String.init(cString:))
         let ioMedia = DADiskCopyIOMedia(disk)
         let mediaContentHint: String?
@@ -346,6 +386,22 @@ private final class DiskArbitrationStreamController: @unchecked Sendable {
             as: URL.self
         )?.path
 
+        let secondMedia = DADiskCopyIOMedia(disk)
+        let ioMediaLookupReturnedObject: Bool?
+        if (ioMedia == 0) == (secondMedia == 0) {
+            ioMediaLookupReturnedObject = ioMedia != 0
+        } else {
+            ioMediaLookupReturnedObject = nil
+        }
+        if secondMedia != 0 { IOObjectRelease(secondMedia) }
+        let currentDictionary = DADiskCopyDescription(disk) as? [String: Any]
+        let hasPhysicalMediaDescription: Bool?
+        if DiskArbitrationDescriptionValueDecoder.descriptionsAgree(rawDictionary, currentDictionary) {
+            hasPhysicalMediaDescription = DiskArbitrationDescriptionValueDecoder.physicalMediaPresence(in: rawDictionary)
+        } else {
+            hasPhysicalMediaDescription = nil
+        }
+
         return DiskArbitrationDescription(
             bsdName: bsdName,
             physicalDiskBSDName: physicalDiskBSDName,
@@ -365,7 +421,9 @@ private final class DiskArbitrationStreamController: @unchecked Sendable {
             isNetworkVolume: bool(
                 for: kDADiskDescriptionVolumeNetworkKey,
                 in: dictionary
-            )
+            ),
+            ioMediaLookupReturnedObject: ioMediaLookupReturnedObject,
+            hasPhysicalMediaDescription: hasPhysicalMediaDescription
         )
     }
 

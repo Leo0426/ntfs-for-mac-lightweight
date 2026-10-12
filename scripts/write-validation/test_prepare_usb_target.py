@@ -50,3 +50,16 @@ class PrepareTargetChecks(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+
+class PreparationFreshGuardChecks(unittest.TestCase):
+    def test_binding_checks_partition_uuids_and_same_connection_identifier(self):
+        self.assertTrue(hasattr(prep, 'preparation_binding'), 'each mutation needs a fresh topology binding')
+        disk = {'DeviceIdentifier': 'disk8', 'Partitions': [
+            {'DeviceIdentifier': 'disk8s1', 'DiskUUID': 'EFI', 'Content': 'EFI', 'Size': prep.EFI_BYTES},
+            {'DeviceIdentifier': 'disk8s2', 'DiskUUID': 'DATA', 'Content': 'Microsoft Basic Data', 'Size': 12}]}
+        binding = prep.preparation_binding(disk, whole())
+        self.assertEqual(binding, prep.preparation_binding(disk, whole()))
+        changed = {**disk, 'Partitions': [disk['Partitions'][0], {**disk['Partitions'][1], 'DiskUUID': 'CLONE'}]}
+        self.assertNotEqual(binding, prep.preparation_binding(changed, whole()))
+        with self.assertRaises(TargetError):
+            prep.preparation_binding({**disk, 'Partitions': [{**disk['Partitions'][0], 'DiskUUID': ''}, disk['Partitions'][1]]}, whole())

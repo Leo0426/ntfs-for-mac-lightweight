@@ -17,6 +17,7 @@ public enum SetupRequirementState: Equatable, Sendable {
     case satisfied
     case actionRequired
     case checking
+    case informational
 }
 
 /// This only hides a misleading registration action from development bundles.
@@ -110,7 +111,7 @@ public struct SetupPresentation: Equatable, Sendable {
             group(
                 id: .writeComponents,
                 title: "写入组件",
-                detail: "macFUSE 与应用内 NTFS-3G 的独立校验。",
+                detail: "macFUSE 与随应用提供的 NTFS-3G 检查。",
                 ids: [.macFUSE, .ntfs3G]
             ),
             group(
@@ -122,7 +123,7 @@ public struct SetupPresentation: Equatable, Sendable {
             group(
                 id: .otherChecks,
                 title: "其他诊断",
-                detail: "授权与已知驱动冲突的独立检查。",
+                detail: "帮助程序授权与独立冲突检查。",
                 ids: [.authorization, .conflictingDrivers]
             ),
         ]
@@ -160,6 +161,8 @@ public struct SetupPresentation: Equatable, Sendable {
             state = .actionRequired
         } else if members.count != ids.count || members.contains(where: { $0.state == .checking }) {
             state = .checking
+        } else if members.contains(where: { $0.state == .informational }) {
+            state = .informational
         } else {
             state = .satisfied
         }
@@ -173,6 +176,7 @@ public struct SetupPresentation: Equatable, Sendable {
         case .satisfied: "已满足"
         case .actionRequired: "待确认"
         case .checking: "检查中"
+        case .informational: "查看说明"
         } }
         let groupDetail: String
         if let observedConflictCount {
@@ -185,7 +189,7 @@ public struct SetupPresentation: Equatable, Sendable {
         } else if id == .writeComponents
                     && members.contains(where: { $0.statusText == "未配置" }) {
             let pendingTitles = members
-                .filter { $0.state == .actionRequired }
+                .filter { $0.state != .satisfied }
                 .map(\.title)
                 .joined(separator: "；")
             groupDetail = "\(pendingTitles)。展开查看详情。"
@@ -282,34 +286,90 @@ public enum SetupPresenter {
         let requirements = base.requirements.map { requirement in
             switch requirement.id {
             case .macFUSE:
-                dependencyRequirement(
-                    requirement,
-                    evidence: report.macFUSEEvidence
-                )
+                report.macFUSEEvidence == .notConfigured && report.facts.macFUSEVersion != nil
+                    ? contradictionRequirement(.macFUSE)
+                    : dependencyRequirement(requirement, evidence: report.macFUSEEvidence)
             case .ntfs3G:
-                dependencyRequirement(
-                    requirement,
-                    evidence: report.ntfs3GEvidence
-                )
+                report.ntfs3GEvidence == .notConfigured && report.facts.ntfs3GVersion != nil
+                    ? contradictionRequirement(.ntfs3G)
+                    : dependencyRequirement(requirement, evidence: report.ntfs3GEvidence,
+                        protectedInstallationVerified: report.protectedInstallationVerified)
+            case .fileSystemExtension:
+                moduleRequirement(requirement, report: report)
+            case .backend:
+                report.protectedInstallationVerified == true
+                    ? informational(.backend, status: "操作前验证", title: "FSKit 运行能力在操作前验证",
+                        detail: "每次启用写入前，帮助程序都会新建一次性 NTFS 镜像，确认真实可写挂载及完整收尾。此页的只读观察不代表后端就绪，也不替代目标实盘资格。")
+                    : requirement
+            case .authorization:
+                authorizationRequirement(requirement, report: report)
+            case .conflictingDrivers:
+                conflictRequirement(requirement, report: report)
             default:
                 requirement
             }
         }
+        let hasActionRequired = requirements.contains { $0.state == .actionRequired }
         let buildTrustPolicyMissing = report.macFUSEEvidence == .notConfigured
             || report.ntfs3GEvidence == .notConfigured
         return SetupPresentation(
-            title: buildTrustPolicyMissing
-                ? "独立可信报告未配置"
-                : base.title,
-            detail: buildTrustPolicyMissing
+            title: report.protectedInstallationVerified != nil
+                ? (hasActionRequired ? "运行环境需要处理" : "运行环境检查完成")
+                : (buildTrustPolicyMissing ? "独立可信报告未配置" : base.title),
+            detail: report.protectedInstallationVerified != nil
+                ? "此页显示当前安装、授权与只读诊断结果。FSKit 运行能力会在每次启用写入前通过新的一次性镜像验证；实盘资格另行核对，独立策略检查不等于写入授权。"
+                : buildTrustPolicyMissing
                 ? "此页尚未配置独立的依赖可信报告，不能据此判断依赖是否缺失，也不决定帮助程序的写入资格。帮助程序每次操作会另行核验目标磁盘与挂载条件；其他检查结果可重新读取。"
                 : base.detail,
             requirements: requirements,
-            primaryAction: buildTrustPolicyMissing ? .recheck : base.primaryAction,
-            secondaryActions: buildTrustPolicyMissing ? [.copyDiagnostics] : base.secondaryActions,
-            isReady: base.isReady,
+            primaryAction: hasActionRequired && !buildTrustPolicyMissing ? base.primaryAction : .recheck,
+            secondaryActions: [.copyDiagnostics],
+            isReady: report.protectedInstallationVerified == nil && base.isReady,
             isBusy: base.isBusy
         )
+    }
+
+    private static func conflictRequirement(_ requirement: SetupRequirementPresentation, report: SystemSetupReport) -> SetupRequirementPresentation {
+        if requirement.observedConflictCount != nil { return requirement }
+        guard report.facts.conflictScanComplete == report.probeResult.conflictScanComplete,
+              (report.probeResult.conflictPolicyObservation == .complete) == report.probeResult.conflictScanComplete else {
+            return contradictionRequirement(.conflictingDrivers)
+        }
+        guard report.probeResult.conflictPolicyObservation == .notConfigured else { return requirement }
+        return informational(.conflictingDrivers, status: "未接入", title: "独立冲突范围尚未接入", detail: "当前候选目录尚未批准为本机独立检查范围；重新检查不会完成这项策略配置。已发现冲突仍会报告，此状态不表示系统无冲突。")
+    }
+
+    private static func contradictionRequirement(_ id: SetupRequirementID) -> SetupRequirementPresentation {
+        SetupRequirementPresentation(id: id, state: .actionRequired, statusText: "证据不一致", title: "当前检查证据不一致", detail: "独立检查来源与报告字段不一致，不能据此确认安全或就绪；请重新读取并核对检查来源。")
+    }
+
+    private static func authorizationRequirement(_ requirement: SetupRequirementPresentation, report: SystemSetupReport) -> SetupRequirementPresentation {
+        guard let installationVerified = report.protectedInstallationVerified else { return requirement }
+        guard installationVerified else {
+            return SetupRequirementPresentation(id: .authorization, state: .actionRequired, statusText: "无法确认", title: "帮助程序授权无法确认", detail: "当前受保护安装件未通过核验，不能继续采用先前的帮助程序授权或连接事实。")
+        }
+        guard report.authorizationStatus == .granted, report.facts.authorizationStatus == .granted else { return requirement }
+        return SetupRequirementPresentation(id: .authorization, state: .satisfied, statusText: "已连接", title: "帮助程序授权与连接已确认", detail: "本次检查确认系统已批准帮助程序，并通过当前签名 XPC 的健康应答；磁盘操作仍须独立核对目标与安全条件。")
+    }
+
+    private static func informational(_ id: SetupRequirementID, status: String, title: String, detail: String) -> SetupRequirementPresentation {
+        SetupRequirementPresentation(id: id, state: .informational, statusText: status, title: title, detail: detail)
+    }
+
+    private static func moduleRequirement(_ requirement: SetupRequirementPresentation, report: SystemSetupReport) -> SetupRequirementPresentation {
+        guard report.facts.fileSystemExtensionEnabled == report.probeResult.fileSystemExtensionEnabled,
+              (report.probeResult.fsKitModuleObservation == .selected) == report.probeResult.fileSystemExtensionEnabled else {
+            return contradictionRequirement(.fileSystemExtension)
+        }
+        return switch report.probeResult.fsKitModuleObservation {
+        case .presentActivationUnknown:
+            informational(.fileSystemExtension, status: "已发现", title: "已发现 macFUSE 文件系统扩展", detail: "PlugInKit 本次返回模块记录，但未明确选择启用；不能从记录存在推断运行能力。每次写入前帮助程序另行执行一次性镜像验证。")
+        case .notObserved where report.protectedInstallationVerified != nil:
+            informational(.fileSystemExtension, status: "未观察到", title: "当前调用未观察到扩展记录", detail: "当前只读查询没有返回预期记录；调用者可见范围不能证明系统未安装。每次写入前帮助程序另行验证实际运行能力。")
+        case .failedClosed:
+            SetupRequirementPresentation(id: .fileSystemExtension, state: .actionRequired, statusText: "读取失败", title: "文件系统扩展状态读取失败", detail: "查询失败、超时、截断或输出不完整，不能推断扩展安全可用。")
+        default: requirement
+        }
     }
 
     private static func dependencyRequirement(
@@ -322,7 +382,7 @@ public enum SetupPresenter {
         case .notConfigured:
             return SetupRequirementPresentation(
                 id: .macFUSE,
-                state: .actionRequired,
+                state: .informational,
                 statusText: "未配置",
                 title: "macFUSE 独立可信报告未配置",
                 detail: "此页尚未配置受信任校验策略，不能据此判断 macFUSE 是否已安装。帮助程序在操作时另行核验挂载条件。"
@@ -388,15 +448,22 @@ public enum SetupPresenter {
 
     private static func dependencyRequirement(
         _ requirement: SetupRequirementPresentation,
-        evidence: NTFS3GSetupEvidence
+        evidence: NTFS3GSetupEvidence,
+        protectedInstallationVerified: Bool?
     ) -> SetupRequirementPresentation {
         switch evidence {
         case .trusted:
             return requirement
         case .notConfigured:
+            if protectedInstallationVerified == true {
+                return SetupRequirementPresentation(id: .ntfs3G, state: .satisfied, statusText: "已核验", title: "随应用提供的 NTFS-3G 已核验", detail: "本次检查核对了受保护安装件的属主、权限、完整文件清单和签名，包含固定打包驱动。独立摘要版本目录未配置；不据此报告驱动版本或实盘兼容性。")
+            }
+            if protectedInstallationVerified == false {
+                return SetupRequirementPresentation(id: .ntfs3G, state: .actionRequired, statusText: "待处理", title: "受保护安装件无法核验", detail: "当前安装件的属主、权限、完整文件清单或签名无法核验；不能据此确认打包驱动可信。")
+            }
             return SetupRequirementPresentation(
                 id: .ntfs3G,
-                state: .actionRequired,
+                state: .informational,
                 statusText: "未配置",
                 title: "NTFS-3G 独立可信报告未配置",
                 detail: "此页尚未配置受信任校验策略，不能据此判断 NTFS-3G 是否已安装。帮助程序在操作时另行核验固定驱动与挂载条件。"

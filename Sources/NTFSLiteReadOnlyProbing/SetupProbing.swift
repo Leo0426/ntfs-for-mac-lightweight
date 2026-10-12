@@ -50,22 +50,42 @@ public struct SetupProbePolicy: Equatable, Sendable {
     )
 }
 
+public enum SetupFSKitModuleObservation: Equatable, Sendable {
+    case selected
+    case presentActivationUnknown
+    case explicitlyIgnored
+    case notObserved
+    case failedClosed
+}
+
+public enum SetupConflictPolicyObservation: Equatable, Sendable {
+    case notConfigured
+    case incomplete
+    case complete
+}
+
 public struct SetupProbeResult: Equatable, Sendable {
     public let fileSystemExtensionEnabled: Bool
     public let conflictScanComplete: Bool
     public let conflictingDriverIdentifiers: [String]
     public let installedConflictCount: Int
+    public let fsKitModuleObservation: SetupFSKitModuleObservation
+    public let conflictPolicyObservation: SetupConflictPolicyObservation
 
     public init(
         fileSystemExtensionEnabled: Bool,
         conflictScanComplete: Bool,
         conflictingDriverIdentifiers: [String],
-        installedConflictCount: Int = 0
+        installedConflictCount: Int = 0,
+        fsKitModuleObservation: SetupFSKitModuleObservation? = nil,
+        conflictPolicyObservation: SetupConflictPolicyObservation? = nil
     ) {
         self.fileSystemExtensionEnabled = fileSystemExtensionEnabled
         self.conflictScanComplete = conflictScanComplete
         self.conflictingDriverIdentifiers = conflictingDriverIdentifiers
         self.installedConflictCount = installedConflictCount
+        self.fsKitModuleObservation = fsKitModuleObservation ?? (fileSystemExtensionEnabled ? .selected : .notObserved)
+        self.conflictPolicyObservation = conflictPolicyObservation ?? (conflictScanComplete ? .complete : .incomplete)
     }
 }
 
@@ -78,10 +98,12 @@ public enum SetupProbeEvaluator {
         environment: ConflictCatalogEnvironment = .unknown,
         footprintProvider: ConflictFootprintProvider = .live
     ) -> SetupProbeResult {
-        let fileSystemExtensionEnabled = selectedFSKitModuleExists(
+        let moduleObservation = observeFSKitModule(
             outputs: plugInKitOutputs,
             acceptedIdentifiers: policy.acceptedFSKitIdentifiers
         )
+
+        let fileSystemExtensionEnabled = moduleObservation == .selected
 
         guard let candidateScope = policy.candidateScope,
               candidateScope.isValid
@@ -90,7 +112,9 @@ public enum SetupProbeEvaluator {
                 fileSystemExtensionEnabled: fileSystemExtensionEnabled,
                 conflictScanComplete: false,
                 conflictingDriverIdentifiers: [],
-                installedConflictCount: 0
+                installedConflictCount: 0,
+                fsKitModuleObservation: moduleObservation,
+                conflictPolicyObservation: policy.candidateScope == nil ? .notConfigured : .incomplete
             )
         }
 
@@ -134,38 +158,33 @@ public enum SetupProbeEvaluator {
                 && kextScan.isComplete
                 && footprintScan.isComplete,
             conflictingDriverIdentifiers: opaqueConflictIdentifiers,
-            installedConflictCount: footprintScan.conflictingArtifactIndexes.count
+            installedConflictCount: footprintScan.conflictingArtifactIndexes.count,
+            fsKitModuleObservation: moduleObservation,
+            conflictPolicyObservation: !systemExtensionScan.isComplete || !kextScan.isComplete || !footprintScan.isComplete
+                ? .incomplete
+                : (activeScopeMatches && environment.matches(candidateScope.target) && policy.environmentBaselineSatisfied ? .complete : .notConfigured)
         )
     }
 
-    private static func selectedFSKitModuleExists(
+    private static func observeFSKitModule(
         outputs: [String: SetupCommandOutput],
         acceptedIdentifiers: Set<String>
-    ) -> Bool {
-        guard !acceptedIdentifiers.isEmpty,
-              Set(outputs.keys) == acceptedIdentifiers
-        else {
-            return false
+    ) -> SetupFSKitModuleObservation {
+        guard !acceptedIdentifiers.isEmpty, Set(outputs.keys) == acceptedIdentifiers else {
+            return .failedClosed
         }
-
-        var foundSelectedModule = false
+        var elections: [PlugInKitElection] = []
         for identifier in acceptedIdentifiers {
-            guard let output = outputs[identifier] else {
-                return false
-            }
-            switch PlugInKitListingParser.parse(
-                output,
-                allowedIdentifiers: [identifier]
-            ) {
-            case let .parsed(records):
-                if records.contains(where: { $0.election == .use }) {
-                    foundSelectedModule = true
-                }
-            case .failedClosed:
-                return false
+            guard let output = outputs[identifier] else { return .failedClosed }
+            switch PlugInKitListingParser.parse(output, allowedIdentifiers: [identifier]) {
+            case let .parsed(records): elections += records.map(\.election)
+            case .failedClosed: return .failedClosed
             }
         }
-        return foundSelectedModule
+        if elections.contains(.use) { return .selected }
+        if elections.contains(.defaultElection) || elections.contains(.debuggerUse) { return .presentActivationUnknown }
+        if elections.contains(.ignore) { return .explicitlyIgnored }
+        return .notObserved
     }
 
     private static func conflictSystemExtensions(
@@ -385,7 +404,8 @@ package struct SetupProbeInvocation {
             executableURL = URL(fileURLWithPath: "/usr/bin/pluginkit")
             arguments = [
                 "-m",
-                "-Dvv",
+                // The strict parser consumes compact records, not verbose metadata blocks.
+                "-D",
                 "-p",
                 "com.apple.fskit.fsmodule",
                 "-i",

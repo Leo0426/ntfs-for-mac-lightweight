@@ -4,6 +4,7 @@ import NTFSLiteCore
 /// the helper re-reads every system fact for each request.
 public struct WriteInteractionLedger: Sendable {
     public private(set) var writableVolumes: Set<VolumeInstanceID> = []
+    public private(set) var releasePendingVolumes: Set<VolumeInstanceID> = []
     public private(set) var unresolvedDisks: Set<PhysicalDiskID> = []
 
     public init() {}
@@ -16,9 +17,14 @@ public struct WriteInteractionLedger: Sendable {
         switch outcome {
         case .writingEnabled:
             writableVolumes.insert(volume)
+            releasePendingVolumes.remove(volume)
         case .needsRefresh:
             unresolvedDisks.insert(volume.diskInstanceID.physicalDiskID)
             writableVolumes.remove(volume)
+            releasePendingVolumes.remove(volume)
+        case .changedAndStopped:
+            writableVolumes.remove(volume)
+            releasePendingVolumes.insert(volume)
         case .ejected, .refused:
             break
         }
@@ -28,18 +34,25 @@ public struct WriteInteractionLedger: Sendable {
         switch outcome {
         case .refused(.helperUnavailable), .refused(.helperVersionMismatch),
              .refused(.identityInvalid),
-             .refused(.diskBusy), .refused(.notConfirmed), .refused(.requestRejected):
+             .refused(.diskBusy), .refused(.runtimeResourcesHeld),
+             .refused(.notConfirmed), .refused(.requestRejected):
             // These are known to stop before an unmount is delivered.
             break
         case .ejected:
+            writableVolumes = writableVolumes.filter { $0.diskInstanceID != disk }
+            releasePendingVolumes = releasePendingVolumes.filter { $0.diskInstanceID != disk }
+        case .changedAndStopped:
+            releasePendingVolumes.formUnion(writableVolumes.filter { $0.diskInstanceID == disk })
             writableVolumes = writableVolumes.filter { $0.diskInstanceID != disk }
         case .needsRefresh, .refused(.release), .refused(.unknownStage),
              .refused(.mount), .writingEnabled:
             // The whole-disk unmount may have changed sibling mounts.
             writableVolumes = writableVolumes.filter { $0.diskInstanceID != disk }
+            releasePendingVolumes = releasePendingVolumes.filter { $0.diskInstanceID != disk }
             unresolvedDisks.insert(disk.physicalDiskID)
         case .refused(.helperTimedOut), .refused(.invalidResponse):
             writableVolumes = writableVolumes.filter { $0.diskInstanceID != disk }
+            releasePendingVolumes = releasePendingVolumes.filter { $0.diskInstanceID != disk }
             unresolvedDisks.insert(disk.physicalDiskID)
         }
     }
@@ -50,6 +63,7 @@ public struct WriteInteractionLedger: Sendable {
     ) {
         guard coverageVerified else { return }
         writableVolumes = writableVolumes.filter { observedDisks.contains($0.diskInstanceID) }
+        releasePendingVolumes = releasePendingVolumes.filter { observedDisks.contains($0.diskInstanceID) }
         // A refreshed inventory cannot prove a timed-out helper has stopped.
         // Its disk remains blocked for this app session.
     }

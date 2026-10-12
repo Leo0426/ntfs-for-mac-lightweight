@@ -484,6 +484,10 @@ public enum HelperResultCode: Int32, Codable, Equatable, Sendable {
     case rejectedDiskBusy = 19
     case executionFailed = 20
     case postconditionFailed = 21
+    /// State may have changed, and the helper proved its own work has stopped. Fresh release may proceed.
+    case stateChangedQuiescent = 22
+    /// This request did not mutate a disk; a prior global runtime proof still owns resources.
+    case rejectedRuntimeResourcesHeld = 23
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
@@ -552,6 +556,11 @@ public struct HelperResponseEnvelope: Codable, Equatable, Sendable {
         self.exitStatus = exitStatus
     }
 
+    public static let diskBusy = HelperResponseEnvelope(resultCode: .rejectedDiskBusy, exitStatus: 1)
+    public static let runtimeResourcesHeld = HelperResponseEnvelope(resultCode: .rejectedRuntimeResourcesHeld, exitStatus: 1)
+
+    public var isSemanticallyValid: Bool { resultCode.accepts(exitStatus: exitStatus) }
+
     public func encode(to encoder: Encoder) throws {
         guard resultCode.accepts(exitStatus: exitStatus) else {
             throw HelperResponseRejection.invalidResultSemantics
@@ -607,6 +616,8 @@ private extension HelperResultCode {
             exitStatus == 0
         case .postconditionFailed:
             true
+        case .stateChangedQuiescent:
+            exitStatus != 0
         case .rejectedMalformedEnvelope,
             .rejectedUnsupportedSchema,
             .rejectedUnknownAction,
@@ -617,6 +628,7 @@ private extension HelperResultCode {
             .rejectedActionTargetMismatch,
             .rejectedOperationCapacity,
             .rejectedDiskBusy,
+            .rejectedRuntimeResourcesHeld,
             .executionFailed:
             exitStatus != 0
         }

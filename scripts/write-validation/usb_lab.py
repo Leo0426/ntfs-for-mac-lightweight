@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from file_cycle import ValidationError, prepare, cleanup
 from manifest_io import load_manifest, save_manifest
 from usb_target import TargetError, require, check_target, check_writable_mount
+from isolation_resources import IsolationLease, LEASE_PATH, wait_for_mutation as retained_mutation_wait
 from user_mount_candidate import (candidate, DRIVER_SHA256, MOUNT_UID, MOUNT_GID,
                                   filesystem_identity, unmount_credentials)
 
@@ -244,12 +245,8 @@ def record(lab, stage, **values):
 
 
 def wait_for_mutation(process):
-    try:
-        return process.wait(timeout=30)
-    except subprocess.TimeoutExpired:
-        emit('quiescencePending', instruction='保持终端开启；命令尚未退出，不会继续下一步。')
-        # Do not kill a mutation or release its lease merely because it timed out.
-        return process.wait()
+    return retained_mutation_wait(process, pending=lambda: emit(
+        'quiescencePending', instruction='保持终端开启；命令尚未退出，不会继续下一步。'))
 
 
 @contextmanager
@@ -374,10 +371,14 @@ class USBLab:
         with (self.folder / f'command-{self.counter:02}.log').open('xb') as log:
             os.fchmod(log.fileno(), 0o600)
             os.fchown(log.fileno(), self.owner, -1)
+            lease = getattr(self, 'lease', None)
             with defer_interrupts():
                 self.pending_mutation = subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT,
-                                                         restore_signals=True,
+                                                         restore_signals=True, start_new_session=True,
+                                                         pass_fds=(() if lease is None else (lease.fd,)),
                                                          **(unmount_credentials() if as_mount_user else {}))
+                if lease is not None:
+                    lease.record_child(self.pending_mutation.pid)
             result = wait_for_mutation(self.pending_mutation)
             self.pending_mutation = None
             require(result == 0, 'diskCommandFailed')
@@ -403,6 +404,9 @@ class USBLab:
             os.fchown(log.fileno(), self.owner, -1)
             with defer_interrupts():
                 self.process = start_driver(driver, self.node, self.root, log)
+                lease = getattr(self, 'lease', None)
+                if lease is not None:
+                    lease.record_child(self.process.pid)
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             require(self.process.poll() is None, 'mountProcessExited')
@@ -493,6 +497,11 @@ class USBLab:
         # Never terminate a driver that might still own a live FSKit connection.
 
 
+
+def verify_experiment_idle(lab):
+    require(lab.pending_mutation is None and lab.process is None, 'experimentChildQuiescenceUnconfirmed')
+    lab.guard('unmounted')  # Fresh target, stable mount table, exact topology and boot identity.
+
 def complete_cycle(lab):
     lab.unmount_native()
     lab.mount()
@@ -551,27 +560,26 @@ def main():
             emit('deviceReadVerified', bootBytes=count, diskMutationsPerformed=False)
             return 0
         # Shared among this experiment's invocations; root-owned and protected from replacement.
-        lease_path = '/private/var/run/ntfslite-usb-lab.lock'
         operation = 'leaseOpen'
-        lease = os.open(lease_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
-        operation = 'leaseMetadata'
-        info = os.fstat(lease)
-        require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_nlink == 1
-                and info.st_mode & 0o777 == 0o600, 'unsafeLeaseFile')
-        operation = 'leaseAcquire'
-        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lease = IsolationLease(LEASE_PATH)
+        lease.__enter__()
         def interrupted(_signum, _frame):
             raise InterruptedError('interrupted')
         signal.signal(signal.SIGTERM, interrupted)
         # A closed terminal must not abort a run holding a live writable mount.
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        operation = 'experimentJournalBegin'
+        lease.begin('usbExperiment')
         operation = 'initializeExperiment'
         lab = USBLab(expected)
+        lab.lease = lease
         operation = 'fileCycle'
         complete_cycle(lab)
+        operation = 'experimentQuiescenceVerification'
+        lease.complete(lambda: verify_experiment_idle(lab))
         return 0
     except BaseException as error:
-        details = failure_details(error, operation)
+        details = failure_details(error, lease.phase if operation == 'leaseOpen' and lease is not None else operation)
         if lab is not None:
             signal.signal(signal.SIGINT, signal.SIG_IGN)
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -584,7 +592,7 @@ def main():
         return 1
     finally:
         if lease is not None:
-            os.close(lease)
+            lease.__exit__(None, None, None)
 
 
 if __name__ == '__main__':

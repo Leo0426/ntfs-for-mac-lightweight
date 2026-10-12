@@ -65,6 +65,12 @@ public struct HelperDriverState: Equatable, Sendable {
     }
 }
 
+/// Only a completed callback/returned and reaped system operation may be refused.
+/// A timeout or absent proof remains unknown and holds the execution lease.
+public enum HelperDiskOperationResult: Sendable, Equatable {
+    case succeeded, refused, unknown
+}
+
 /// Primitive system operations the privileged helper implements; every answer is fresh.
 public protocol WritableMountSystem: HelperMediaTopologyReading {
     func readBootSector(partitionBSDName: String) async -> Data?
@@ -73,6 +79,7 @@ public protocol WritableMountSystem: HelperMediaTopologyReading {
     func fsKitRuntimeReady() async -> Bool?
     /// Standard (never forced) unmount of the native read-only mount.
     func unmountNative(bsdName: String, expectedRegistryEntryID: UInt64) async -> Bool
+    func unmountNativeResult(bsdName: String, expectedRegistryEntryID: UInt64) async -> HelperDiskOperationResult
     /// No-recovery health probe; nil means unknown.
     func healthIsClean(bsdName: String) async -> Bool?
     func pathExists(_ path: String) async -> Bool
@@ -85,6 +92,12 @@ public protocol WritableMountSystem: HelperMediaTopologyReading {
     func isWritable(mountPoint: String) async -> Bool
     /// Short wait between mount-table polls.
     func pause() async
+}
+
+public extension WritableMountSystem {
+    func unmountNativeResult(bsdName: String, expectedRegistryEntryID: UInt64) async -> HelperDiskOperationResult {
+        await unmountNative(bsdName: bsdName, expectedRegistryEntryID: expectedRegistryEntryID) ? .succeeded : .unknown
+    }
 }
 
 /// Fixed, non-sensitive stage codes returned as the helper exit status.
@@ -157,8 +170,10 @@ public enum WritableMountExecutor {
         guard freshUUID.caseInsensitiveCompare(target.volumeUUID) == .orderedSame else {
             return refused(.volumeUUIDMismatch)
         }
-        guard await system.unmountNative(bsdName: bsd, expectedRegistryEntryID: expectedEntryID) else {
-            return changed(.nativeUnmountFailed)
+        switch await system.unmountNativeResult(bsdName: bsd, expectedRegistryEntryID: expectedEntryID) {
+        case .succeeded: break
+        case .refused: return stopped(.nativeUnmountFailed)
+        case .unknown: return changed(.nativeUnmountFailed)
         }
 
         // After the native unmount: the volume state has changed; the app must re-read facts.
@@ -170,7 +185,8 @@ public enum WritableMountExecutor {
             target.disk, selectedVolumeBSDName: bsd, system: system
         ) else { return changed(.targetMismatch) }
         guard await system.readBootSector(partitionBSDName: bsd) == boot else { return changed(.bootSectorChanged) }
-        guard await system.healthIsClean(bsdName: bsd) == true else { return changed(.healthNotClean) }
+        guard let clean = await system.healthIsClean(bsdName: bsd) else { return changed(.healthNotClean) }
+        guard clean else { return stopped(.healthNotClean) }
 
         // The no-recovery probe may take up to a minute. Bind the same media
         // and boot bytes again immediately before the driver is started.
@@ -195,11 +211,11 @@ public enum WritableMountExecutor {
             root = "/Volumes/" + candidate
             break
         }
-        guard let root else { return changed(.driverStartFailed) }
+        guard let root else { return stopped(.driverStartFailed) }
         guard let pid = await system.startDriver(
             bsdName: bsd, expectedRegistryEntryID: expectedEntryID, mountPoint: root
         ) else {
-            return changed(.driverStartFailed)
+            return stopped(.driverStartFailed)
         }
         var entry: HelperMountEntry?
         for _ in 0..<mountPollLimit {
@@ -257,6 +273,10 @@ public enum WritableMountExecutor {
 
     private static func refused(_ failure: WritableMountFailure) -> HelperResponseEnvelope {
         HelperResponseEnvelope(resultCode: .executionFailed, exitStatus: failure.rawValue)
+    }
+
+    private static func stopped(_ failure: WritableMountFailure) -> HelperResponseEnvelope {
+        HelperResponseEnvelope(resultCode: .stateChangedQuiescent, exitStatus: failure.rawValue)
     }
 
     private static func changed(_ failure: WritableMountFailure) -> HelperResponseEnvelope {

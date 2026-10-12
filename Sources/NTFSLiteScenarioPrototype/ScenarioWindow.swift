@@ -353,7 +353,7 @@ private struct SetupDetail: View {
 
     private func statusColor(_ state: SetupRequirementState) -> Color {
         switch state {
-        case .satisfied:
+        case .satisfied, .informational:
             .primary
         case .actionRequired:
             .orange

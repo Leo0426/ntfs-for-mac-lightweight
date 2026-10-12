@@ -88,19 +88,41 @@ public struct SystemSetupReport: Equatable, Sendable {
     public let ntfs3GEvidence: NTFS3GSetupEvidence
     public let authorizationStatus: SetupAuthorizationStatus
     public let probeResult: SetupProbeResult
+    public let protectedInstallationVerified: Bool?
 
     public init(
         facts: SetupFacts,
         macFUSEEvidence: MacFUSESetupEvidence,
         ntfs3GEvidence: NTFS3GSetupEvidence,
         authorizationStatus: SetupAuthorizationStatus,
-        probeResult: SetupProbeResult
+        probeResult: SetupProbeResult,
+        protectedInstallationVerified: Bool? = nil
     ) {
         self.facts = facts
         self.macFUSEEvidence = macFUSEEvidence
         self.ntfs3GEvidence = ntfs3GEvidence
         self.authorizationStatus = authorizationStatus
         self.probeResult = probeResult
+        self.protectedInstallationVerified = protectedInstallationVerified
+    }
+
+    public func recordingAuthorization(_ status: SetupAuthorizationStatus) -> SystemSetupReport {
+        let updatedFacts = SetupFacts(
+            macOSVersion: facts.macOSVersion, architecture: facts.architecture,
+            macFUSEVersion: facts.macFUSEVersion, ntfs3GVersion: facts.ntfs3GVersion,
+            fileSystemExtensionEnabled: facts.fileSystemExtensionEnabled,
+            selectedBackend: facts.selectedBackend, authorizationStatus: status,
+            conflictScanComplete: facts.conflictScanComplete, conflictingDrivers: facts.conflictingDrivers
+        )
+        return SystemSetupReport(facts: updatedFacts, macFUSEEvidence: macFUSEEvidence,
+            ntfs3GEvidence: ntfs3GEvidence, authorizationStatus: status, probeResult: probeResult,
+            protectedInstallationVerified: protectedInstallationVerified)
+    }
+
+    public func recordingProtectedInstallation(_ verified: Bool) -> SystemSetupReport {
+        SystemSetupReport(facts: facts, macFUSEEvidence: macFUSEEvidence, ntfs3GEvidence: ntfs3GEvidence,
+                          authorizationStatus: authorizationStatus, probeResult: probeResult,
+                          protectedInstallationVerified: verified)
     }
 
     /// Reconciles duplicated system evidence conservatively. A report can be
@@ -332,5 +354,24 @@ private extension NTFS3GSetupEvidence {
 
     var versionText: String? {
         version.map { "\($0.major).\($0.minor).\($0.patch)" }
+    }
+}
+
+/// Final authority is read after all slow environment probes. Neither the
+/// initial concurrent authorization result nor an earlier report can grant it.
+public enum SystemSetupReportFinalizer {
+    public static func currentReport(
+        using loader: SystemSetupFactsLoader,
+        authorizationProvider: SetupAuthorizationStatusProvider,
+        installationVerifier: @Sendable () -> Bool
+    ) async -> SystemSetupReport {
+        let trustedBefore = installationVerifier()
+        let report = await loader.currentReport()
+        let finalAuthorization = await authorizationProvider.currentStatus()
+        let trustedAfter = installationVerifier()
+        let installationVerified = trustedBefore && trustedAfter
+        let authorization: SetupAuthorizationStatus = finalAuthorization == .granted && !installationVerified
+            ? .unknown : finalAuthorization
+        return report.recordingProtectedInstallation(installationVerified).recordingAuthorization(authorization)
     }
 }

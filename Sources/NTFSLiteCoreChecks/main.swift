@@ -5597,14 +5597,24 @@ func setupPresentationGroupsRelatedChecksWithoutHidingFailures() {
 
 func setupWriteComponentsGroupDoesNotClaimMissingInstallForUnconfiguredTrust() {
     let presentation = SetupPresenter.presentation(
-        for: positiveFSKitSetupReport(),
+        for: SystemSetupReport(
+            facts: SetupFacts(
+                macOSVersion: SemanticVersion(major: 15, minor: 4, patch: 0),
+                architecture: .appleSilicon, macFUSEVersion: nil, ntfs3GVersion: nil,
+                fileSystemExtensionEnabled: false, selectedBackend: .unknown,
+                authorizationStatus: .unknown, conflictScanComplete: false, conflictingDrivers: []
+            ),
+            macFUSEEvidence: .notConfigured, ntfs3GEvidence: .notConfigured,
+            authorizationStatus: .unknown,
+            probeResult: SetupProbeResult(fileSystemExtensionEnabled: false, conflictScanComplete: false, conflictingDriverIdentifiers: [])
+        ),
         isRefreshing: false
     )
     guard let components = presentation.groups.first(where: { $0.id == .writeComponents }) else {
         fatalError("CHECK FAILED: Setup should show the write components group")
     }
     expect(
-        components.state == .actionRequired
+        components.state == .informational
             && components.requirements.map(\.id) == [.macFUSE, .ntfs3G]
             && components.requirements.allSatisfy {
                 $0.statusText == "未配置" && !$0.title.contains("未安装")
@@ -5614,7 +5624,12 @@ func setupWriteComponentsGroupDoesNotClaimMissingInstallForUnconfiguredTrust() {
 
     let mixedEvidence = SetupPresenter.presentation(
         for: SystemSetupReport(
-            facts: readySetupFacts(),
+            facts: SetupFacts(
+                macOSVersion: SemanticVersion(major: 15, minor: 4, patch: 0),
+                architecture: .appleSilicon, macFUSEVersion: nil, ntfs3GVersion: nil,
+                fileSystemExtensionEnabled: true, selectedBackend: .fsKit,
+                authorizationStatus: .granted, conflictScanComplete: true, conflictingDrivers: []
+            ),
             macFUSEEvidence: .notConfigured,
             ntfs3GEvidence: .failedClosed(.invalidVersionCatalog),
             authorizationStatus: .granted,
@@ -8116,6 +8131,133 @@ func inventoryExcludesOnlyExplicitNetworkVolumeEvents() async {
             && mismatchObservation.issues.contains(.enumerationCoverageUnverified),
         "independent IOMedia coverage must expose an incorrectly excluded physical identity"
     )
+}
+
+func nonPhysicalScopePreservesRawDescriptionTypesAndIdentityPresence() {
+    let baseline: [String: Any] = ["DAVolumeKind": "devicefs", "DAVolumeNetwork": false,
+                                  "DAMediaBSDMajor": 48, "DAMediaBSDMinor": 4]
+    expect(DiskArbitrationDescriptionValueDecoder.physicalMediaPresence(in: baseline) == false,
+           "valid DeviceFS logical major/minor alone are not physical media identity")
+    for badUUID in ["invalid", NSNumber(value: 7)] as [Any] {
+        var malformed = baseline
+        malformed["DAVolumeUUID"] = badUUID
+        expect(DiskArbitrationDescriptionValueDecoder.physicalMediaPresence(in: malformed) != false,
+               "present but undecodable volume UUID must not masquerade as absent identity")
+    }
+    var typeChanged = baseline
+    typeChanged["DAVolumeNetwork"] = NSNumber(value: 0)
+    expect(!DiskArbitrationDescriptionValueDecoder.descriptionsAgree(baseline, typeChanged),
+           "equal-valued CFNumber cannot replace strict CFBoolean in stable system evidence")
+    expect(DiskArbitrationDescriptionValueDecoder.descriptionsAgree(baseline, baseline),
+           "identical typed DA descriptions must agree")
+    var invalidMajor = baseline
+    invalidMajor["DAMediaBSDMajor"] = true
+    expect(DiskArbitrationDescriptionValueDecoder.physicalMediaPresence(in: invalidMajor) == nil,
+           "boolean must not masquerade as logical BSD major number")
+    invalidMajor["DAMediaBSDMajor"] = 48.0
+    expect(DiskArbitrationDescriptionValueDecoder.physicalMediaPresence(in: invalidMajor) == nil,
+           "floating point must not masquerade as logical BSD major number")
+    var malformedPhysical = baseline
+    malformedPhysical["DAMediaWhole"] = "unknown"
+    expect(DiskArbitrationDescriptionValueDecoder.physicalMediaPresence(in: malformedPhysical) == true,
+           "malformed raw physical fields remain present rather than disappearing in typed decoding")
+    expect(DiskArbitrationDescriptionValueDecoder.physicalMediaPresence(in: nil) == nil,
+           "a missing DA dictionary cannot prove absent physical identity")
+}
+
+func inventoryRequiresConsistentDeviceFSNonPhysicalEvidence() async {
+    let mountPoint = "/Users/test/Library/Developer/CoreDevice/DeviceFS"
+    func description(
+        bsd: String? = nil, ioMedia: Bool? = false, fs: String? = "devicefs",
+        parent: String? = nil, size: UInt64? = nil, network: Bool? = false,
+        registryID: UInt64? = nil, whole: Bool? = nil, physicalFields: Bool? = false
+    ) -> DiskArbitrationDescription {
+        DiskArbitrationDescription(
+            bsdName: bsd, physicalDiskBSDName: parent, isWholeDisk: whole,
+            isInternal: nil, isEjectable: nil, isRemovable: nil, mediaSize: size,
+            mediaUUID: nil, volumeUUID: nil, volumeName: "devices",
+            fileSystemName: fs, mountPoint: mountPoint,
+            mediaRegistryID: registryID, isNetworkVolume: network, ioMediaLookupReturnedObject: ioMedia, hasPhysicalMediaDescription: physicalFields
+        )
+    }
+    func record(
+        source: String = "devices -- file:///Users/test/Devices/",
+        canonical: Bool = true, symlink: Bool = false, fs: String = "devicefs",
+        id: [Int32]? = [17, 42], local: Bool? = true, fsKit: Bool? = true,
+        complete: Bool = true
+    ) -> SystemMountRecord {
+        SystemMountRecord(
+            sourcePath: source, sourceBSDName: MountSourceParser.bsdName(from: source),
+            mountPoint: mountPoint, fileSystemName: fs, access: .readWrite,
+            backend: .unknown, isCanonical: canonical, isSymlink: symlink,
+            isComplete: complete, fileSystemID: id, isLocal: local, isFSKit: fsKit
+        )
+    }
+    func observe(
+        _ d: DiskArbitrationDescription,
+        records: [SystemMountRecord], kind: DiskArbitrationEventKind = .appeared,
+        mediaNames: Set<String> = []
+    ) async -> DiskInventoryObservation {
+        let inventory = ReadOnlyDiskInventory(mountTableProvider: MountTableSnapshotProvider {
+            SystemMountTableSnapshot(records: records)
+        })
+        await inventory.handle(DiskArbitrationEvent(kind: kind, description: d))
+        _ = await inventory.verifyEnumerationCoverage(using: IOMediaEnumerationSnapshot(bsdNames: mediaNames))
+        return await inventory.currentInventory()
+    }
+    let valid = record()
+    for kind in [DiskArbitrationEventKind.appeared, .descriptionChanged, .disappeared] {
+        let result = await observe(description(), records: [valid], kind: kind)
+        expect(result.isComplete && result.physicalDisks.isEmpty,
+               "verified DeviceFS file-backed local mount must stay outside physical inventory")
+    }
+    for d in [description(ioMedia: nil), description(ioMedia: true),
+              description(fs: nil), description(fs: "ntfs"),
+              description(parent: "disk98"), description(size: 1024),
+              description(network: nil), description(registryID: 42), description(whole: false),
+              description(physicalFields: nil), description(physicalFields: true)] {
+        let result = await observe(d, records: [valid])
+        expect(result.issues.contains(.unidentifiedDiskEvent),
+               "missing or physical DA evidence must never exempt an unidentified event")
+    }
+    let badRecords: [[SystemMountRecord]] = [
+        [], [valid, valid], [record(source: "/dev/disk98s1")],
+        [record(source: "devices -- file:///dev/disk98s1")],
+        [record(source: "devices -- file://remote/Users/test/Devices/")],
+        [record(source: "devices -- file:///Users/test/Devices/?query=1")],
+        [record(source: "devices -- file:///Users/test/../Devices/")],
+        [record(canonical: false)], [record(symlink: true)], [record(fs: "ntfs")],
+        [record(id: nil)], [record(id: [0, 0])], [record(id: [17])],
+        [record(local: nil)], [record(local: false)], [record(fsKit: nil)],
+        [record(fsKit: false)], [record(complete: false)]
+    ]
+    for records in badRecords {
+        let result = await observe(description(), records: records)
+        expect(result.issues.contains(.unidentifiedDiskEvent),
+               "incomplete, ambiguous, physical or contradictory mount evidence must fail closed")
+    }
+    let physical = await observe(description(bsd: "disk98"), records: [valid], mediaNames: ["disk98"])
+    expect(!physical.isComplete, "DeviceFS spelling cannot exclude a physical BSD identity")
+    let missingPhysical = await observe(description(), records: [valid], mediaNames: ["disk98"])
+    expect(missingPhysical.issues.contains(.enumerationCoverageUnverified),
+           "DeviceFS scope cannot bypass independent physical enumeration coverage")
+    for changedRecord in [record(id: [17, 43]), record(source: "devices -- file:///Users/test/Other/")] {
+        let first = SystemMountTableSnapshot(records: [valid])
+        let second = SystemMountTableSnapshot(records: [changedRecord])
+        let samples = LockedMountTableSnapshotSource([.success(first), .success(second), .success(second)])
+        let changing = ReadOnlyDiskInventory(mountTableProvider: MountTableSnapshotProvider { try samples.next() })
+        await changing.handle(DiskArbitrationEvent(kind: .appeared, description: description()))
+        let result = await changing.currentInventory()
+        expect(result.issues.contains(.unidentifiedDiskEvent),
+               "mount identity or source replacement between reads must fail closed")
+    }
+    let unreadable = ReadOnlyDiskInventory(mountTableProvider: MountTableSnapshotProvider {
+        throw SystemMountTableReadError.changedDuringRead
+    })
+    await unreadable.handle(DiskArbitrationEvent(kind: .appeared, description: description()))
+    let unreadableResult = await unreadable.currentInventory()
+    expect(unreadableResult.issues.contains(.unidentifiedDiskEvent),
+           "unavailable mount table cannot classify an unknown event as nonphysical")
 }
 
 func diskArbitrationBooleanDecoderAcceptsOnlyCFBoolean() {
@@ -11265,6 +11407,10 @@ func helperEnablementUIRequiresTheExpectedProtectedInstallLocation() {
         "the build copy must not offer helper registration; this path hint is not a security authorization")
 }
 
+nonPhysicalScopePreservesRawDescriptionTypesAndIdentityPresence()
+await inventoryRequiresConsistentDeviceFSNonPhysicalEvidence()
+print("PASS: DeviceFS nonphysical scope requires consistent independent evidence")
+
 helperEnablementUIRequiresTheExpectedProtectedInstallLocation()
 print("PASS: helper enablement UI requires the expected protected install location")
 
@@ -11300,8 +11446,8 @@ func helperUnreachableOffersOnlyGuardedReregistration() {
     expect(HelperServiceState.unreachable.text.contains("当前不提供磁盘操作"),
            "the unreachable state must stay closed for disk operations")
     expect(HelperReregistrationPolicy.mayProceed(
-        state: .unreachable, systemReportsEnabled: true, hasBusyDisk: false
-    ), "an idle, enabled-but-unreachable helper may be re-registered")
+        state: .unreachable, systemReportsEnabled: true, hasBusyDisk: false, hasFreshQuiescenceProof: true
+    ), "an independently quiescent, enabled-but-unreachable helper may be re-registered")
     expect(!HelperReregistrationPolicy.mayProceed(
         state: .unreachable, systemReportsEnabled: true, hasBusyDisk: true
     ), "re-registration must wait while a disk operation is in progress")
@@ -17637,6 +17783,7 @@ final class FakeWritableMountSystem: WritableMountSystem, @unchecked Sendable {
     var onRuntimeProbe: ((FakeWritableMountSystem) -> Void)?
     var replacementVolumeUUIDAfterHealth: String?
     var nativeUnmountSucceeds = true
+    var nativeUnmountCompletion: HelperDiskOperationResult?
     var mount: HelperMountEntry?
     var mountAppearsAfterStart = true
     var placeholder = true
@@ -17694,6 +17841,10 @@ final class FakeWritableMountSystem: WritableMountSystem, @unchecked Sendable {
         calls.append("runtime")
         onRuntimeProbe?(self)
         return fsKitReady
+    }
+    func unmountNativeResult(bsdName: String, expectedRegistryEntryID: UInt64) async -> HelperDiskOperationResult {
+        let success = await unmountNative(bsdName: bsdName, expectedRegistryEntryID: expectedRegistryEntryID)
+        return nativeUnmountCompletion ?? (success ? .succeeded : .unknown)
     }
     func unmountNative(bsdName: String, expectedRegistryEntryID: UInt64) async -> Bool {
         calls.append("unmount")
@@ -17848,6 +17999,76 @@ func helperProcessInventoryRejectsTruncationAndUnknownProcesses() {
 helperProcessInventoryRejectsTruncationAndUnknownProcesses()
 print("PASS: helper process enumeration refuses truncated PID lists and unreadable live processes")
 
+func unavailableProcessPathsRequireStableNonDeviceEvidence() {
+    expect(HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(
+        errno: 0, pathError: ENOENT, confirmedNoDeviceHandles: true
+    ), "live ENOENT may recover only from positive storage-handle absence")
+    for error in [EACCES, EPERM, EINVAL, ESRCH, 0] {
+        expect(!HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(
+            errno: 0, pathError: error, confirmedNoDeviceHandles: true
+        ), "resource fallback must not mask other executable-path failures")
+    }
+    for evidence in [false, nil] as [Bool?] {
+        expect(!HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(
+            errno: 0, pathError: ENOENT, confirmedNoDeviceHandles: evidence
+        ), "unknown or unsafe device inspection remains closed")
+    }
+    expect(!HelperProcessInspectionPolicy.mayIgnoreUnreadableProcess(
+        errno: EPERM, pathError: ENOENT, confirmedNoDeviceHandles: true
+    ), "a denied process existence check cannot recover")
+    for kind in [S_IFREG, S_IFDIR] {
+        expect(HelperProcessInspectionPolicy.isNonDeviceVnode(mode: UInt16(kind), device: 123, nullDevice: 99),
+               "regular files and directories are positively non-device resources")
+    }
+    expect(HelperProcessInspectionPolicy.isNonDeviceVnode(mode: UInt16(S_IFCHR), device: 99, nullDevice: 99),
+           "only the independently bound null device may pass as a character descriptor")
+    for kind in [S_IFCHR, S_IFBLK, S_IFIFO, S_IFLNK, 0] {
+        expect(!HelperProcessInspectionPolicy.isNonDeviceVnode(mode: UInt16(kind), device: 123, nullDevice: 99),
+               "disk, raw disk and unknown vnode types must stop fallback")
+    }
+    for outcome in [WriteOutcome.refused(.mount(.factsUnavailable)), .refused(.release(.factsUnavailable))] {
+        let text = WriteOutcomeText.text(outcome)
+        expect(text.contains("检查未完成") && !text.contains("磁盘已变化"),
+               "unavailable process/system facts must not be presented as media replacement")
+    }
+}
+unavailableProcessPathsRequireStableNonDeviceEvidence()
+print("PASS: unavailable process paths recover only from stable non-device facts and retain accurate refusal messages")
+
+func kernelExecutableAndArgumentsRequireCompleteIdentity() {
+    func fixture(_ path: String, _ arguments: [String]) -> [UInt8] {
+        var argc = Int32(arguments.count)
+        return withUnsafeBytes(of: &argc) { Array($0) } + Array(path.utf8) + [0, 0]
+            + arguments.flatMap { Array($0.utf8) + [0] }
+    }
+    let first = fixture("/a/Helper", ["Helper", "value"])
+    let replacement = fixture("/b/Helper", ["Helper", "value"])
+    expect(HelperKernelArguments.decode(first)?.arguments == ["Helper", "value"],
+           "complete argc-delimited arguments must decode")
+    expect(HelperKernelArguments.decode(first) != HelperKernelArguments.decode(replacement),
+           "same argv after exec path replacement is not stable process identity")
+    expect(HelperKernelArguments.decode(Array(first.dropLast())) == nil,
+           "missing final argument terminator must fail closed")
+    for index in [4, first.count - 2] {
+        var malformed = first
+        malformed[index] = 255
+        expect(HelperKernelArguments.decode(malformed) == nil,
+               "invalid UTF-8 in kernel executable or arguments must not decode lossily")
+    }
+    for count: Int32 in [-1, 0, 257] {
+        var malformed = first
+        var count = count
+        malformed.replaceSubrange(0..<4, with: withUnsafeBytes(of: &count) { Array($0) })
+        expect(HelperKernelArguments.decode(malformed) == nil, "unknown argc must not enter positive identity evidence")
+    }
+    expect(HelperKernelArguments.decode(fixture("/a/ntfs-3g", ["Helper"])) == nil,
+           "mismatched argv0 must not hide a possible driver executable")
+}
+kernelExecutableAndArgumentsRequireCompleteIdentity()
+print("PASS: strict kernel executable/argument identities reject exec replacement and incomplete strings")
+
+
+
 func helperMountTableRequiresCompleteStableReads() {
     expect(HelperMountTableSnapshotPolicy.isComplete(
         initialCount: 3, copiedCount: 3, countAfterRead: 3, capacity: 11
@@ -17865,17 +18086,43 @@ print("PASS: helper mount-table reads reject capacity exhaustion and topology ch
 
 func helperDiskAbsenceRequiresTheOriginalIOMediaObjectToDisappear() {
     expect(HelperDiskPresencePolicy.isPresent(
-        deviceNodeExists: false, bsdNameInRegistry: false,
-        requestedEntryInRegistry: false, diskArbitrationHasDisk: false
-    ) == false, "all four fresh sources must agree that the requested disk disappeared")
+        deviceNodeExists: false, bsdNameInRegistry: false, requestedEntryInRegistry: false
+    ) == false, "three fresh kernel sources must agree that the requested disk disappeared")
     expect(HelperDiskPresencePolicy.isPresent(
-        deviceNodeExists: false, bsdNameInRegistry: false,
-        requestedEntryInRegistry: true, diskArbitrationHasDisk: false
+        deviceNodeExists: false, bsdNameInRegistry: false, requestedEntryInRegistry: true
     ) == true, "the original IOMedia object remaining with no BSD name is still present")
+    for unknown in 0..<3 {
+        var evidence: [Bool?] = [false, false, false]
+        evidence[unknown] = nil
+        expect(HelperDiskPresencePolicy.isPresent(
+            deviceNodeExists: evidence[0], bsdNameInRegistry: evidence[1],
+            requestedEntryInRegistry: evidence[2]
+        ) == nil, "any unreadable kernel fact cannot certify safe removal")
+    }
     expect(HelperDiskPresencePolicy.isPresent(
-        deviceNodeExists: false, bsdNameInRegistry: false,
-        requestedEntryInRegistry: nil, diskArbitrationHasDisk: false
-    ) == nil, "an unreadable registry identity cannot certify safe removal")
+        deviceNodeExists: false, bsdNameInRegistry: true, requestedEntryInRegistry: false
+    ) == true, "a reused BSD name must prevent safe-removal confirmation")
+    let absent = HelperDiskPresenceSnapshot(deviceNodeExists: false,
+                                          bsdNames: ["disk0"], registryEntryIDs: [10])
+    func presence(_ first: HelperDiskPresenceSnapshot?, _ second: HelperDiskPresenceSnapshot?) -> Bool? {
+        HelperDiskPresencePolicy.isPresent(bsdName: "disk6", registryEntryID: 600,
+                                           first: first, second: second)
+    }
+    expect(presence(absent, absent) == false, "two complete stable kernel snapshots confirm absence")
+    expect(presence(absent, nil) == nil, "an incomplete second snapshot cannot confirm absence")
+    let changed = HelperDiskPresenceSnapshot(deviceNodeExists: false,
+                                           bsdNames: ["disk0", "disk7"], registryEntryIDs: [10, 700])
+    expect(presence(absent, changed) == nil, "changing inventory remains unknown even if target is absent")
+    let originalPresent = HelperDiskPresenceSnapshot(deviceNodeExists: false,
+                                                    bsdNames: ["disk0"], registryEntryIDs: [10, 600])
+    expect(presence(originalPresent, originalPresent) == true,
+           "original registry entry without its BSD name remains present")
+    let reusedName = HelperDiskPresenceSnapshot(deviceNodeExists: false,
+                                               bsdNames: ["disk0", "disk6"], registryEntryIDs: [10, 900])
+    expect(presence(reusedName, reusedName) == true, "new disk at reused BSD name remains present")
+    let existingNode = HelperDiskPresenceSnapshot(deviceNodeExists: true,
+                                                 bsdNames: ["disk0"], registryEntryIDs: [10])
+    expect(presence(existingNode, existingNode) == true, "remaining devnode prevents absence")
 }
 
 helperDiskAbsenceRequiresTheOriginalIOMediaObjectToDisappear()
@@ -18025,7 +18272,9 @@ func writableMountExecutorVerifiesBeforeAndAfterMutation() async {
         let system = FakeWritableMountSystem()
         configure(system)
         let result = await WritableMountExecutor.run(target: writableMountTarget(), system: system)
-        expect(result == HelperResponseEnvelope(resultCode: .postconditionFailed, exitStatus: expected.rawValue)
+        let expectedResult: HelperResultCode = system.healthClean == false && expected == .healthNotClean
+            ? .stateChangedQuiescent : .postconditionFailed
+        expect(result == HelperResponseEnvelope(resultCode: expectedResult, exitStatus: expected.rawValue)
                && system.calls.contains("unmount") && system.calls.contains("start") == started, message)
     }
     await afterUnmount({ $0.bootSectors[1][72] = 8 }, .bootSectorChanged, started: false,
@@ -18103,11 +18352,16 @@ final class FakeDiskReleaseSystem: DiskReleaseSystem, @unchecked Sendable {
     var ownedReadCount = 0
     var replacementOwnedAfterRead: Int?
     var unmountSucceeds = true
+    var unmountCompletion: HelperDiskOperationResult?
     var clearOwnedOnUnmount = true
     var driverExits = true
     var ejectSucceeds = true
     var diskRemains = false
     var presenceScript: [Bool?] = []
+    var unavailableOwnedReadsAfterRelease = 0
+    var replaceTopologyAfterUnavailableRead = false
+    var introduceMountAfterUnavailableRead = false
+    var pauses = 0
     var calls: [String] = []
 
     func volumeFacts(bsdName: String) async -> HelperVolumeFacts? {
@@ -18130,11 +18384,25 @@ final class FakeDiskReleaseSystem: DiskReleaseSystem, @unchecked Sendable {
     func partitions(ofDisk bsdName: String) async -> [String]? { bsdName == "disk6" ? ["disk6s1", "disk6s2"] : nil }
     func ownedFSKitMounts(devicePath: String) async -> [HelperOwnedMount]? {
         guard devicePath == "/dev/disk6s2" else { return [] }
+        if calls.contains("rmdir"), unavailableOwnedReadsAfterRelease > 0 {
+            unavailableOwnedReadsAfterRelease -= 1
+            if replaceTopologyAfterUnavailableRead {
+                topology = helperMediaTopology(diskRegistryEntryID: 999)
+            }
+            if introduceMountAfterUnavailableRead {
+                owned = [HelperOwnedMount(mountPoint: "/Volumes/NewMount", driverPID: 4343)]
+            }
+            return nil
+        }
         ownedReadCount += 1
         if let replacementOwnedAfterRead, ownedReadCount > replacementOwnedAfterRead {
             return [HelperOwnedMount(mountPoint: "/Volumes/NewMount", driverPID: 4343)]
         }
         return owned
+    }
+    func unmountFileSystemResult(mountPoint: String) async -> HelperDiskOperationResult {
+        let success = await unmountFileSystem(mountPoint: mountPoint)
+        return unmountCompletion ?? (success ? .succeeded : .unknown)
     }
     func unmountFileSystem(mountPoint: String) async -> Bool {
         calls.append("unmount:" + mountPoint)
@@ -18161,7 +18429,7 @@ final class FakeDiskReleaseSystem: DiskReleaseSystem, @unchecked Sendable {
     var removed = false
     var orphans: [HelperOwnedMount] = []
     func orphanedMounts(diskBSDName: String) async -> [HelperOwnedMount]? { removed ? orphans : [] }
-    func pause() async {}
+    func pause() async { pauses += 1 }
 }
 
 func diskReleaseExecutorUsesOnlyStandardReleaseAndFailsClosed() async {
@@ -18224,6 +18492,38 @@ func diskReleaseExecutorUsesOnlyStandardReleaseAndFailsClosed() async {
            && whole.calls.contains("unmount:/Volumes/NTFSLite-a"),
            "unmounting a disk must release the helper's FSKit mounts on its partitions")
     let wholeStillMounted = FakeDiskReleaseSystem()
+    let settlingResources = FakeDiskReleaseSystem()
+    settlingResources.unavailableOwnedReadsAfterRelease = 1
+    let settlingResult = await DiskReleaseExecutor.unmountDisk(target: disk, system: settlingResources)
+    expect(settlingResult == ok && settlingResources.pauses == 1
+           && settlingResources.calls == ["unmount:/Volumes/NTFSLite-a", "wait", "rmdir"],
+           "post-unmount resource facts may settle through fresh readonly proof without replaying any mutation")
+    let neverSettles = FakeDiskReleaseSystem()
+    neverSettles.unavailableOwnedReadsAfterRelease = 100
+    let unsettledResult = await DiskReleaseExecutor.unmountDisk(target: disk, system: neverSettles)
+    expect(unsettledResult == changed(.factsUnavailable) && neverSettles.pauses == 4
+           && neverSettles.calls == ["unmount:/Volumes/NTFSLite-a", "wait", "rmdir"],
+           "persistent unknown post-unmount facts remain closed after a bounded readonly settlement window")
+    let replacedWhileSettling = FakeDiskReleaseSystem()
+    replacedWhileSettling.unavailableOwnedReadsAfterRelease = 1
+    replacedWhileSettling.replaceTopologyAfterUnavailableRead = true
+    let replacedWhileSettlingResult = await DiskReleaseExecutor.unmountDisk(target: disk, system: replacedWhileSettling)
+    expect(replacedWhileSettlingResult == changed(.targetMismatch) && replacedWhileSettling.pauses == 1
+           && replacedWhileSettling.calls == ["unmount:/Volumes/NTFSLite-a", "wait", "rmdir"],
+           "a replacement during readonly settlement closes immediately and cannot be retried back to an older target")
+    let newMountWhileSettling = FakeDiskReleaseSystem()
+    newMountWhileSettling.unavailableOwnedReadsAfterRelease = 1
+    newMountWhileSettling.introduceMountAfterUnavailableRead = true
+    let newMountResult = await DiskReleaseExecutor.unmountDisk(target: disk, system: newMountWhileSettling)
+    expect(newMountResult == changed(.stillMounted) && newMountWhileSettling.pauses == 1
+           && newMountWhileSettling.calls == ["unmount:/Volumes/NTFSLite-a", "wait", "rmdir"],
+           "a new mount during settlement is not released or ignored using the previous completed unmount")
+    let unknownUnmount = FakeDiskReleaseSystem()
+    unknownUnmount.unmountCompletion = .unknown
+    let unknownUnmountResult = await DiskReleaseExecutor.unmountDisk(target: disk, system: unknownUnmount)
+    expect(unknownUnmountResult == changed(.unmountRefused) && unknownUnmount.pauses == 0
+           && unknownUnmount.calls == ["unmount:/Volumes/NTFSLite-a"],
+           "an unconfirmed mutation never enters readonly post-unmount settlement or later disk actions")
     wholeStillMounted.clearOwnedOnUnmount = false
     let wholeStillMountedResult = await DiskReleaseExecutor.unmountDisk(target: disk, system: wholeStillMounted)
     expect(wholeStillMountedResult == changed(.stillMounted),
@@ -18563,10 +18863,10 @@ func writeSessionSendsOnlyConfirmedExclusiveFixedRequests() async {
     _ = await partialSession.enableWriting(volume, in: observation, confirmedAsDataVolume: true)
     let partialResult = await partialSession.safeEject(volume.diskInstanceID, in: observation)
     let partialRetry = await partialSession.safeEject(volume.diskInstanceID, in: observation)
-    expect(partialResult == .needsRefresh(.helperUnavailable)
-           && partialRetry == .refused(.diskBusy)
-           && partialTransport.actions == ["mountReadWrite", "unmountDisk", "ejectDisk"],
-           "any failure after a completed unmount is a changed state and cannot be retried")
+    expect(partialResult == .changedAndStopped(.helperUnavailable)
+           && partialRetry == .refused(.helperUnavailable)
+           && partialTransport.actions == ["mountReadWrite", "unmountDisk", "ejectDisk", "unmountDisk"],
+           "an undelivered eject after confirmed unmount permits a new standard release with fresh identity")
 
     expect(WriteOutcomeText.text(.refused(.mount(.healthNotClean))).contains("Windows")
            && WriteOutcomeText.text(.ejected).contains("拔出")
@@ -18644,3 +18944,233 @@ func writeInteractionLedgerKeepsUnknownDisksClosedAndDropsAbsentRecords() {
 
 writeInteractionLedgerKeepsUnknownDisksClosedAndDropsAbsentRecords()
 print("PASS: write UI locks unknown outcomes and removes records only after verified absence")
+
+private final class CaptureRefreshProbeState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var latest: DiskInventoryObservation?
+    private var enumerationCount = 0
+    private var failing = false
+    var last: DiskInventoryObservation? { lock.withLock { latest } }
+    var calls: Int { lock.withLock { enumerationCount } }
+    func record(_ value: DiskInventoryObservation) { lock.withLock { latest = value } }
+    func fail(_ value: Bool) { lock.withLock { failing = value } }
+    func enumerate() throws -> IOMediaEnumerationSnapshot {
+        let fail = lock.withLock { enumerationCount += 1; return failing }
+        if fail { throw IOMediaEnumerationReadError.unexpectedFailure }
+        return IOMediaEnumerationSnapshot(bsdNames: ["disk99"])
+    }
+}
+
+func liveCaptureRefreshPreservesGenerationAndRechecksCoverage() async {
+    let state = CaptureRefreshProbeState()
+    let events = AsyncStream<DiskArbitrationEvent>.makeStream()
+    let observer = ReadOnlyDiskObserver(
+        eventProvider: DiskEventStreamProvider { events.stream },
+        mountTableProvider: MountTableSnapshotProvider { SystemMountTableSnapshot(records: []) },
+        mediaEnumerationProvider: IOMediaEnumerationSnapshotProvider { try state.enumerate() },
+        settleInterval: .milliseconds(5), enumerationTimeout: .milliseconds(200))
+    let capture: ReadOnlyDiskObservationCapture
+    do { capture = try observer.capture() } catch { fatalError("capture should start") }
+    let collector = Task {
+        for await event in capture.events {
+            if case let .observation(value) = event { state.record(value) }
+        }
+    }
+    func waitFor(_ condition: () -> Bool) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while !condition(), ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(5)) }
+        return condition()
+    }
+    events.continuation.yield(DiskArbitrationEvent(kind: .appeared,
+        description: diskDescription(bsdName: "disk99", physicalDiskBSDName: "disk99", isWholeDisk: true)))
+    let initiallyVerified = await waitFor { state.last?.issues.isEmpty == true && state.last?.physicalDisks.count == 1 }
+    expect(initiallyVerified,
+           "initial source must obtain complete enumeration coverage")
+    let disk = state.last!.physicalDisks[0].instanceID
+    let before = state.calls
+    state.fail(true)
+    expect(capture.refresh(), "active capture must accept a readonly recheck")
+    let failedFreshCoverage = await waitFor { state.calls > before && state.last?.issues.contains(.enumerationCoverageUnverified) == true }
+    expect(failedFreshCoverage,
+           "fresh enumeration failure cannot retain the earlier coverage grant")
+    expect(state.last?.physicalDisks.first?.instanceID == disk,
+           "a failed readonly recheck must not invent a new physical connection generation")
+    let failedCalls = state.calls
+    state.fail(false)
+    expect(capture.refresh(), "active source may recheck new current facts")
+    let refreshedCoverage = await waitFor { state.calls > failedCalls && state.last?.issues.isEmpty == true }
+    expect(refreshedCoverage,
+           "successful independent enumeration must re-establish coverage from current facts")
+    expect(state.last?.physicalDisks.first?.instanceID == disk,
+           "stable live source must preserve the connected disk instance across refreshes")
+    capture.stopImmediately()
+    expect(!capture.refresh(), "a stopped source cannot be revived by readonly refresh")
+    collector.cancel()
+    await collector.value
+}
+await liveCaptureRefreshPreservesGenerationAndRechecksCoverage()
+print("PASS: live capture refresh preserves connection identity and requires new independent coverage")
+
+
+// Full repair: a stopped failure is recoverable without authorizing a write.
+func changedQuiescentReplyAndRecovery() async {
+    let wire = Data("{\"schemaVersion\":1,\"resultCode\":22,\"exitStatus\":9}".utf8)
+    guard case let .success(response) = HelperResponseDecoder().decode(wire) else {
+        fatalError("CHECK FAILED: a changed-but-confirmed-stopped reply must be protocol-valid")
+    }
+    expect(response.resultCode.rawValue == 22 && response.exitStatus == 9,
+           "stopped failure must retain its concrete stage")
+    let system = FakeWritableMountSystem()
+    system.healthClean = false
+    let result = await WritableMountExecutor.run(target: writableMountTarget(), system: system)
+    expect(result.resultCode.rawValue == 22 && !system.calls.contains("start"),
+           "reaped health rejection must report stopped changed state, never start a driver or freeze forever")
+    let processor = HelperRequestProcessor(admission: .isolatedForChecks()) { _ in response }
+    func request() -> Data {
+        try! JSONEncoder().encode(HelperRequestEnvelope(operationID: HelperOperationID(), action: .unmountDisk,
+            target: .disk(helperDiskTarget(disk: "disk42"))))
+    }
+    let first = try! HelperResponseDecoder().decode(await processor.respond(to: request())).get()
+    let next = try! HelperResponseDecoder().decode(await processor.respond(to: request())).get()
+    let frozen = await processor.hasFrozenDisk()
+    expect(first.resultCode.rawValue == 22 && next.resultCode.rawValue == 22 && !frozen,
+           "confirmed stopped failure releases only its execution lease; a fresh request must revalidate")
+    let volume = VolumeInstanceID(volumeID: VolumeID(uuid: "4e6d1fc6-d631-3bd7-ae52-e7fca880a904", bsdName: "disk6s2"),
+        diskInstanceID: DiskInstanceID(physicalDiskID: PhysicalDiskID(rawValue: "disk6"), mediaGeneration: MediaGeneration(rawValue: 3)))
+    let observation = writeSessionObservation(volume)
+    let transport = FakeHelperTransport([.reply(wire), helperReply(.succeeded, 0), helperReply(.succeeded, 0)])
+    let session = WriteSession(transport: transport)
+    let failed = await session.enableWriting(volume, in: observation, confirmedAsDataVolume: true)
+    expect(failed != .writingEnabled && !WriteOutcomeText.text(failed).contains("未进行任何更改"),
+           "a stopped changed failure must never be rendered unchanged or writable")
+    let ejected = await session.safeEject(volume.diskInstanceID, in: observation)
+    expect(ejected == .ejected && transport.actions == ["mountReadWrite", "unmountDisk", "ejectDisk"],
+           "failed write with verified quiescence retains the binding for fresh standard release")
+}
+await changedQuiescentReplyAndRecovery()
+print("PASS: changed-but-stopped failures are distinguished from unknown execution and allow fresh bound standard release")
+
+
+func helperMalformedResultAndMaintenanceAdmission() async {
+    let busy = try! JSONEncoder().encode(HelperResponseEnvelope.diskBusy)
+    expect(try! HelperResponseDecoder().decode(busy).get().resultCode == .rejectedDiskBusy,
+           "physical-disk busy factory must survive real encoding and decoding")
+    let runtimeHeld = try! JSONEncoder().encode(HelperResponseEnvelope.runtimeResourcesHeld)
+    expect(try! HelperResponseDecoder().decode(runtimeHeld).get().resultCode == .rejectedRuntimeResourcesHeld,
+           "a global runtime resource hold must have its own valid nonzero response, not physical-disk busy")
+    expect(!HelperResponseEnvelope(resultCode: .rejectedRuntimeResourcesHeld, exitStatus: 0).isSemanticallyValid,
+           "a runtime hold cannot be encoded as a successful zero status")
+    let invalid = HelperRequestProcessor(admission: .isolatedForChecks()) { _ in
+        HelperResponseEnvelope(resultCode: .rejectedDiskBusy, exitStatus: 0)
+    }
+    func request() -> Data {
+        try! JSONEncoder().encode(HelperRequestEnvelope(operationID: HelperOperationID(), action: .unmountDisk,
+            target: .disk(helperDiskTarget(disk: "disk42"))))
+    }
+    let first = try! HelperResponseDecoder().decode(await invalid.respond(to: request())).get()
+    let second = try! HelperResponseDecoder().decode(await invalid.respond(to: request())).get()
+    expect(first.resultCode == .postconditionFailed && second.resultCode == .rejectedDiskBusy,
+           "invalid executor semantics must become a valid unknown response with lease retained, never empty data")
+    let invalidReady = await invalid.prepareForMaintenance(checkResources: { true })
+    expect(!invalidReady, "unknown/frozen work cannot prepare a lifecycle change")
+    actor Holding {
+        var started = false
+        var continuation: CheckedContinuation<Void, Never>?
+        func run() async -> HelperResponseEnvelope {
+            await withCheckedContinuation { continuation = $0; started = true }
+            return HelperResponseEnvelope(resultCode: .succeeded, exitStatus: 0)
+        }
+        func release() { continuation?.resume(); continuation = nil }
+    }
+    let holding = Holding()
+    let processor = HelperRequestProcessor(admission: .isolatedForChecks()) { _ in await holding.run() }
+    let active = Task { await processor.respond(to: request()) }
+    while await !holding.started { await Task.yield() }
+    let activeReady = await processor.prepareForMaintenance(checkResources: { true })
+    expect(!activeReady, "active operations exclude lifecycle preparation")
+    await holding.release()
+    _ = await active.value
+    let quietReady = await processor.prepareForMaintenance(checkResources: { true })
+    expect(quietReady, "proven quiet executor can atomically close admission")
+    let after = try! HelperResponseDecoder().decode(await processor.respond(to: request())).get()
+    expect(after.resultCode == .rejectedDiskBusy,
+           "after lifecycle preparation no later disk request may execute in that daemon")
+    let repeatedReady = await processor.prepareForMaintenance(checkResources: { true })
+    expect(!repeatedReady, "lifecycle challenge preparation is one-shot")
+    let challenge = Data(repeating: 7, count: 16)
+    expect(HelperMaintenanceCheck.accepts(HelperMaintenanceCheck.response(for: challenge)!, for: challenge)
+           && !HelperMaintenanceCheck.accepts(Data(), for: challenge)
+           && !HelperMaintenanceCheck.accepts(HelperHealthCheck.response(for: challenge)!, for: challenge),
+           "signed lifecycle proof must be nonempty, challenge-bound and distinct from health reachability")
+}
+await helperMalformedResultAndMaintenanceAdmission()
+print("PASS: malformed executor replies retain leases; maintenance is exclusive and distinct from health reachability")
+
+func confirmedRefusalDiffersFromTimeout() async {
+    let native = FakeWritableMountSystem()
+    native.nativeUnmountSucceeds = false
+    native.nativeUnmountCompletion = .refused
+    let dissent = await WritableMountExecutor.run(target: writableMountTarget(), system: native)
+    expect(dissent.resultCode == .stateChangedQuiescent && !native.calls.contains("start"),
+           "a returned DA dissenter has stopped; it may be freshly retried without dropping unknown leases")
+    let unknown = FakeWritableMountSystem()
+    unknown.nativeUnmountSucceeds = false
+    unknown.nativeUnmountCompletion = .unknown
+    let timeout = await WritableMountExecutor.run(target: writableMountTarget(), system: unknown)
+    expect(timeout.resultCode == .postconditionFailed,
+           "a DA deadline does not prove the queued unmount stopped")
+    let fs = FakeDiskReleaseSystem()
+    fs.unmountSucceeds = false
+    fs.unmountCompletion = .refused
+    let refused = await DiskReleaseExecutor.unmountVolume(target: writableMountTarget(), system: fs)
+    expect(refused.resultCode == .stateChangedQuiescent && !fs.calls.contains("wait"),
+           "a completed standard-unmount refusal remains stopped and must not start further cleanup")
+    let pending = FakeDiskReleaseSystem()
+    pending.unmountSucceeds = false
+    pending.unmountCompletion = .unknown
+    let unresolved = await DiskReleaseExecutor.unmountVolume(target: writableMountTarget(), system: pending)
+    expect(unresolved.resultCode == .postconditionFailed,
+           "an unconfirmed standard-unmount child keeps the disk frozen")
+    let callbacks = HelperCallbackRegistry<HelperDiskOperationResult>(timeoutResult: .unknown)
+    let actual = await withCheckedContinuation { continuation in
+        let token = callbacks.register(continuation, retainedResource: nil)!
+        callbacks.timeout(token)
+        callbacks.complete(token, result: .refused)
+    }
+    expect(actual == .unknown && callbacks.pendingCount == 0,
+           "a late refused callback after deadline cannot retroactively certify quiescence")
+}
+await confirmedRefusalDiffersFromTimeout()
+print("PASS: completed disk-operation refusal differs from unconfirmed timeout; late callback cannot rewrite result")
+
+func maintenanceExcludesAdmissionBeforeResourceProof() async {
+    actor Proof {
+        var started = false
+        var continuation: CheckedContinuation<Void, Never>?
+        func wait() async -> Bool {
+            await withCheckedContinuation { continuation = $0; started = true }
+            return false
+        }
+        func release() { continuation?.resume(); continuation = nil }
+    }
+    let proof = Proof()
+    let processor = HelperRequestProcessor(admission: .isolatedForChecks()) { _ in
+        HelperResponseEnvelope(resultCode: .succeeded, exitStatus: 0)
+    }
+    func request() -> Data {
+        try! JSONEncoder().encode(HelperRequestEnvelope(operationID: HelperOperationID(), action: .unmountDisk,
+            target: .disk(helperDiskTarget(disk: "disk42"))))
+    }
+    let preparing = Task { await processor.prepareForMaintenance(checkResources: { await proof.wait() }) }
+    while await !proof.started { await Task.yield() }
+    let during = try! HelperResponseDecoder().decode(await processor.respond(to: request())).get()
+    await proof.release()
+    let accepted = await preparing.value
+    expect(during.resultCode == .rejectedDiskBusy && !accepted,
+           "lifecycle preparation must seal disk admission before it awaits live resource proof")
+    let after = try! HelperResponseDecoder().decode(await processor.respond(to: request())).get()
+    expect(after.resultCode == .succeeded,
+           "failed proof restores only its maintenance gate, not frozen/unknown disk leases")
+}
+await maintenanceExcludesAdmissionBeforeResourceProof()
+print("PASS: maintenance closes admission before resource scan and restores it only on failed proof")

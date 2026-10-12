@@ -155,6 +155,9 @@ enum DiagnosticSummaryFormatter {
                 ] + (event.reason.map { ["原因：\($0.label)"] } ?? []))
         case let .operation(event):
             var fields = ["结果：\(event.result.label)", "耗时：\(event.elapsedMilliseconds) 毫秒"]
+            if let traceID = event.traceID { fields.append("追踪组：\(traceID.uuidString)（不是授权）") }
+            if let code = event.helperStageCode { fields.append("帮助程序固定阶段码：\(code)") }
+            if let certainty = event.certainty { fields.append("结果确认：\(certainty.label)") }
             if let status = event.exitStatus {
                 let code = status.code.map { "（\($0)）" } ?? ""
                 fields.append("进程：\(status.kind.label)\(code)")
@@ -413,4 +416,15 @@ private extension DiagnosticExitKind {
     case .signaled: "因信号终止"
     case .launchFailed: "启动失败"
     } }
+}
+
+private extension DiagnosticResultCertainty {
+    var label: String {
+        switch self {
+        case .unchanged: "未发生磁盘变更"
+        case .changedQuiescent: "状态已改变，本次变更已确认静止"
+        case .verified: "该阶段结果已验证且完成"
+        case .unknown: "结果或变更静止未知，继续失败关闭"
+        }
+    }
 }

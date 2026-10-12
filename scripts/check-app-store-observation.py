@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Run the real App/store/controllers with a checks entry point, without launching the UI."""
+"""Check real stores and window restoration without starting disk observation."""
 from pathlib import Path
 import platform
+import plistlib
 import subprocess
 import tempfile
+import uuid
 
 PROJECT = Path(__file__).resolve().parent.parent
 
@@ -16,7 +18,7 @@ def main():
     source = (PROJECT / "Sources/NTFSLiteReadOnlyApp/NTFSLiteReadOnlyApp.swift").read_text()
     entry = "@main\n@MainActor\nstruct NTFSLiteReadOnlyApp: App"
     assert source.count(entry) == 1, "application entry point changed; update the checks compiler"
-    with tempfile.TemporaryDirectory(prefix="ntfslite-app-observation-") as folder:
+    with tempfile.TemporaryDirectory(prefix="ntfslite-app-observation-", dir="/private/tmp") as folder:
         folder = Path(folder)
         app_source = folder / "NTFSLiteReadOnlyApp.swift"
         app_source.write_text(source.replace(entry, entry.removeprefix("@main\n"), 1))
@@ -33,7 +35,13 @@ def main():
             assert selected, "missing Release objects: " + module
             objects.extend(selected)
         module_dir = binary_dir / "Modules" if (binary_dir / "Modules").is_dir() else binary_dir
-        executable = folder / "AppStoreObservationChecks"
+        bundle = folder / "AppStoreObservationChecks.app"
+        executable = bundle / "Contents/MacOS/AppStoreObservationChecks"
+        executable.parent.mkdir(parents=True)
+        (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps({
+            "CFBundleExecutable": executable.name, "CFBundleIdentifier": "com.leolu.ntfslite.app-checks." + uuid.uuid4().hex,
+            "CFBundlePackageType": "APPL", "NSPrincipalClass": "NSApplication",
+        }))
         subprocess.run([
             "swiftc", "-parse-as-library", "-swift-version", "6", "-warnings-as-errors",
             "-target", platform.machine() + "-apple-macosx15.4", "-I", str(module_dir),
@@ -43,7 +51,15 @@ def main():
             str(PROJECT / "Tests/AppStoreObservationChecks/main.swift"),
             *map(str, objects), "-o", str(executable)
         ], check=True, cwd=PROJECT)
-        subprocess.run([str(executable)], check=True, cwd=PROJECT)
+        subprocess.run(["codesign", "--force", "--sign", "-", str(bundle)], check=True, cwd=PROJECT, capture_output=True)
+        stdout = folder / "stdout.log"
+        stderr = folder / "stderr.log"
+        subprocess.run(["open", "-n", "-W", "--stdout", str(stdout), "--stderr", str(stderr), "--env", "NTFSLITE_APP_CHECKS_ROOT=" + str(folder), str(bundle)], check=True, cwd=PROJECT, timeout=120)
+        output = stdout.read_text() if stdout.exists() else ""
+        errors = stderr.read_text() if stderr.exists() else ""
+        print(output, end="")
+        print(errors, end="")
+        assert "PASS: helper refresh updates the observed app store without page navigation" in output, "application checks did not complete successfully"
 
 
 if __name__ == "__main__":

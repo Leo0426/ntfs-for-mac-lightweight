@@ -95,16 +95,22 @@ public struct ReadOnlyDiskObservationCapture: Sendable {
 
     private let requestStopAndDrain: @Sendable () async -> Bool
     private let requestImmediateStop: @Sendable () -> Void
+    private let requestFreshObservation: @Sendable () -> Bool
 
     fileprivate init(
         events: AsyncStream<ReadOnlyDiskObservationCaptureEvent>,
         stopAndDrain: @escaping @Sendable () async -> Bool,
-        stopImmediately: @escaping @Sendable () -> Void
+        stopImmediately: @escaping @Sendable () -> Void,
+        refresh: @escaping @Sendable () -> Bool
     ) {
         self.events = events
         requestStopAndDrain = stopAndDrain
         requestImmediateStop = stopImmediately
+        requestFreshObservation = refresh
     }
+
+    /// Rechecks current mount facts and enumeration on the same live event source.
+    public func refresh() -> Bool { requestFreshObservation() }
 
     public func stopAndDrain() async -> Bool {
         await requestStopAndDrain()
@@ -184,13 +190,15 @@ public struct ReadOnlyDiskObserver: Sendable {
             },
             stopImmediately: {
                 controller.stop()
-            }
+            },
+            refresh: { controller.refresh() }
         )
     }
 }
 
 private final class ReadOnlyObservationController: @unchecked Sendable {
     private enum Input: Sendable {
+        case refresh
         case event(DiskArbitrationEvent)
         case sourceFinished(wasRequestedDrain: Bool)
         case settle(UUID)
@@ -249,6 +257,8 @@ private final class ReadOnlyObservationController: @unchecked Sendable {
         inputs = inputStream.stream
         inputContinuation = inputStream.continuation
     }
+
+    func refresh() -> Bool { submit(.refresh) }
 
     func start() {
         lock.lock()
@@ -375,6 +385,17 @@ private final class ReadOnlyObservationController: @unchecked Sendable {
         }
 
         switch input {
+        case .refresh:
+            guard !state.sourceFinished else { return true }
+            state.revision = UUID()
+            state.isSettled = false
+            state.isEnumerationPending = false
+            cancelSettlement()
+            cancelEnumeration()
+            await inventory.markEnumerationPending()
+            guard publish(await inventory.currentInventory()) else { return false }
+            scheduleSettlement(for: state.revision)
+
         case let .event(event):
             state.revision = UUID()
             state.isSettled = false

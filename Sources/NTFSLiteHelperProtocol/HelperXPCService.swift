@@ -44,6 +44,20 @@ public enum HelperHealthCheck {
 @objc public protocol NTFSLiteHelperXPC {
     func healthCheck(_ challenge: Data, withReply reply: @escaping @Sendable (Data) -> Void)
     func submit(_ request: Data, withReply reply: @escaping @Sendable (Data) -> Void)
+    /// Quiescent lifecycle preparation; it never authorizes a disk action.
+    func prepareForReregistration(_ challenge: Data, withReply reply: @escaping @Sendable (Data) -> Void)
+}
+
+public enum HelperMaintenanceCheck {
+    private static let prefix = Data("NTFSLite:maintenance:v2:".utf8)
+    public static func response(for challenge: Data) -> Data? {
+        guard challenge.count == HelperHealthCheck.challengeByteCount else { return nil }
+        return prefix + challenge
+    }
+    public static func accepts(_ reply: Data, for challenge: Data) -> Bool {
+        guard let expected = response(for: challenge) else { return false }
+        return reply == expected
+    }
 }
 
 /// Runs the atomic admission step and hands only admitted requests to the executor.
@@ -78,6 +92,17 @@ public struct HelperRequestProcessor: Sendable {
         return await executionLease.hasFrozenDisk()
     }
 
+    /// Close admission before awaiting independent live resource proof.
+    /// Failed preparation changes only this gate; frozen disk leases remain untouched.
+    public func prepareForMaintenance(checkResources: @Sendable () async -> Bool) async -> Bool {
+        guard !uncertainty.isUnknown, await executionLease.prepareForMaintenance() else { return false }
+        guard await checkResources(), !uncertainty.isUnknown else {
+            await executionLease.cancelMaintenancePreparation()
+            return false
+        }
+        return true
+    }
+
     public func respond(to data: Data) async -> Data {
         let response: HelperResponseEnvelope
         switch await admission.admit(data) {
@@ -98,7 +123,9 @@ public struct HelperRequestProcessor: Sendable {
                 await executionLease.freeze(diskName)
                 response = HelperResponseEnvelope(resultCode: .postconditionFailed, exitStatus: 1)
             } else {
-                let executed = await executor(request)
+                let raw = await executor(request)
+                let executed = raw.isSemanticallyValid ? raw
+                    : HelperResponseEnvelope(resultCode: .postconditionFailed, exitStatus: 96)
                 if uncertainty.isUnknown {
                     response = HelperResponseEnvelope(resultCode: .postconditionFailed, exitStatus: 1)
                     await executionLease.freeze(diskName)
@@ -123,9 +150,22 @@ private actor HelperDiskExecutionLease {
     static let processLifetime = HelperDiskExecutionLease()
     private var occupied: Set<String> = []
     private var frozen: Set<String> = []
+    private var maintenance = false
 
     func begin(_ diskName: String) -> Bool {
-        occupied.insert(diskName).inserted
+        guard !maintenance else { return false }
+        return occupied.insert(diskName).inserted
+    }
+
+    func prepareForMaintenance() -> Bool {
+        guard occupied.isEmpty, frozen.isEmpty, !maintenance else { return false }
+        maintenance = true
+        return true
+    }
+
+    func cancelMaintenancePreparation() {
+        guard maintenance, occupied.isEmpty, frozen.isEmpty else { return }
+        maintenance = false
     }
 
     func end(_ diskName: String) {

@@ -19,6 +19,8 @@ public protocol HelperTransport: Sendable {
 public enum WriteRefusal: Equatable, Sendable {
     case notConfirmed
     case diskBusy
+    /// A different runtime image operation still owns resources; this target request was not started.
+    case runtimeResourcesHeld
     case identityInvalid
     case helperUnavailable
     case helperVersionMismatch
@@ -37,6 +39,8 @@ public enum WriteOutcome: Equatable, Sendable {
     case refused(WriteRefusal)
     /// The disk state changed or is unknown; the app must re-read system facts.
     case needsRefresh(WriteRefusal)
+    /// State may have changed, but no helper work remains active. Retained binding permits fresh standard release.
+    case changedAndStopped(WriteRefusal)
 }
 
 /// ADR 0011: one operation per physical disk, explicit confirmation, fresh one-shot IDs and only
@@ -72,6 +76,9 @@ public actor WriteSession {
         if let outcome { retainIfUnresolved(outcome, for: target.diskInstanceID) }
         if outcome == nil {
             writable.insert(target)
+            bindingsByDisk[target.diskInstanceID] = diskBinding
+        } else if case .changedAndStopped = outcome {
+            writable.remove(target)
             bindingsByDisk[target.diskInstanceID] = diskBinding
         }
         return outcome ?? .writingEnabled
@@ -109,8 +116,9 @@ public actor WriteSession {
         if let failure = await send(.ejectDisk, .disk(helperDisk), stage: WriteRefusal.release) {
             // The standard whole-disk unmount already succeeded. Even a refused
             // eject leaves changed state that needs more than a normal refresh.
+            if case let .refused(refusal) = failure { return .changedAndStopped(refusal) }
+            if case .changedAndStopped = failure { return failure }
             unresolvedDisks.insert(disk.physicalDiskID)
-            if case let .refused(refusal) = failure { return .needsRefresh(refusal) }
             return failure
         }
         bindingsByDisk.removeValue(forKey: disk)
@@ -136,11 +144,15 @@ public actor WriteSession {
             switch response.resultCode {
             case .succeeded: return nil
             case .rejectedDiskBusy: return .refused(.diskBusy)
+            case .rejectedRuntimeResourcesHeld: return .refused(.runtimeResourcesHeld)
             case .rejectedUnsupportedSchema: return .refused(.helperVersionMismatch)
             case .executionFailed:
                 if case .unknownStage = refusal { return .needsRefresh(refusal) }
                 return .refused(refusal)
             case .postconditionFailed: return .needsRefresh(refusal)
+            case .stateChangedQuiescent:
+                guard stage(response.exitStatus) != nil else { return .needsRefresh(refusal) }
+                return .changedAndStopped(refusal)
             default: return .refused(.requestRejected)
             }
         }
@@ -265,12 +277,53 @@ public actor WriteSession {
             case .efiSystem:
                 guard record.isRecognizedUnMountedEFIPartition(on: current) else { return false }
             case .ntfsTarget:
-                guard record.isBoundMicrosoftBasicDataNTFS(on: current),
+                guard currentNTFSPartitionSupportsSessionEject(record, on: current),
                       record.evidence.roleEvidence != .protected,
                       record.evidence.roleEvidence != .conflicting,
                       record.snapshot?.role.isProtected != true
                 else { return false }
             }
+        }
+        return true
+    }
+
+    /// Session release uses the retained physical partition binding, not a cached
+    /// filesystem UUID. A current unmounted partition can therefore be checked
+    /// after its mount-scoped supplemental UUID disappears. This grants no write
+    /// eligibility; the helper independently checks the complete exact layout.
+    private static func currentNTFSPartitionSupportsSessionEject(
+        _ record: ReadOnlyVolumeRecord,
+        on disk: ReadOnlyPhysicalDiskRecord
+    ) -> Bool {
+        let evidence = record.evidence
+        let basicData = UUID(uuidString: "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7")!
+        guard evidence.fileSystemName?.lowercased() == "ntfs",
+              let content = evidence.mediaContent,
+              content == "Windows_NTFS" || (
+                  content.utf8.count == 36 && UUID(uuidString: content) == basicData
+              ),
+              record.issues.allSatisfy({ issue in
+                  switch issue {
+                  case .unknownVolumeRole, .missingDisplayName: return true
+                  case .missingVolumeUUID:
+                      return evidence.volumeUUID == nil
+                          && evidence.diskArbitrationMountPoint == nil
+                          && record.mountObservation == nil
+                  default: return false
+                  }
+              })
+        else { return false }
+        if let instance = record.snapshot?.instanceID ?? record.candidate?.instanceID {
+            guard instance.diskInstanceID == disk.instanceID,
+                  instance.volumeID.bsdName == evidence.bsdName else { return false }
+        }
+        if evidence.diskArbitrationMountPoint != nil {
+            guard record.isBoundMicrosoftBasicDataNTFS(on: disk),
+                  let access = record.candidate?.mountAccess ?? record.snapshot?.mountAccess,
+                  access != .unmounted
+            else { return false }
+        } else if record.mountObservation != nil {
+            return false
         }
         return true
     }
@@ -294,6 +347,7 @@ public enum WriteOutcomeText {
         case .ejected: return "已安全推出，可以拔出磁盘。"
         case .refused(.diskBusy): return "本次请求未执行：这块磁盘正在进行另一项操作。请等待状态更新。"
         case let .refused(refusal): return "未进行任何更改：" + reason(refusal)
+        case let .changedAndStopped(refusal): return reason(refusal) + " 本次请求未完成，帮助程序已确认操作停止。请重新读取并核验当前挂载状态，核验后可安全推出。"
         case let .needsRefresh(refusal): return reason(refusal) + " 磁盘状态尚未确认。请重新读取；在结果明确前，请勿直接拔出或再次操作。"
         }
     }
@@ -302,6 +356,7 @@ public enum WriteOutcomeText {
         switch refusal {
         case .notConfirmed: return "需要先确认这是数据卷。"
         case .diskBusy: return "这块磁盘正在进行另一项操作。"
+        case .runtimeResourcesHeld: return "后端运行检查的收尾尚未确认，帮助程序仍保留镜像和进程资源，已暂停所有磁盘操作。请保留当前状态，不要重复提交；这不表示所选物理盘正在执行普通操作。"
         case .identityInvalid: return "磁盘身份信息不完整。"
         case .helperUnavailable: return "帮助程序未安装或未获批准，请在“运行环境”中安装并在系统设置中允许。"
         case .helperVersionMismatch: return "帮助程序与当前应用版本不匹配。请在“运行环境”中重新启用或更新帮助程序，然后重新读取。"
@@ -316,7 +371,8 @@ public enum WriteOutcomeText {
 
     static func mountReason(_ failure: WritableMountFailure) -> String {
         switch failure {
-        case .targetMismatch, .factsUnavailable, .volumeUUIDMismatch: return "磁盘已变化或无法确认是同一个卷，请重新读取后再试。"
+        case .factsUnavailable: return "系统事实或驱动进程检查未完成，已停止操作。请重新读取；持续失败时需检查后台进程与诊断记录。"
+        case .targetMismatch, .volumeUUIDMismatch: return "磁盘已变化或无法确认是同一个卷，请重新读取后再试。"
         case .notExternalRemovable: return "只支持外置、可移除的 USB 或雷雳磁盘。"
         case .notNTFS: return "这个卷不是 NTFS。"
         case .notNativeReadOnly: return "卷需要先以系统只读方式挂载（重新插拔通常即可）。"
@@ -333,7 +389,8 @@ public enum WriteOutcomeText {
 
     static func releaseReason(_ failure: DiskReleaseFailure) -> String {
         switch failure {
-        case .targetMismatch, .factsUnavailable: return "磁盘已变化或状态无法确认。"
+        case .factsUnavailable: return "系统事实或驱动进程检查未完成，已停止操作。"
+        case .targetMismatch: return "磁盘已变化或状态无法确认。"
         case .notExternalRemovable: return "只支持外置、可移除的磁盘。"
         case .ambiguousMount: return "发现无法识别的挂载，已停止以免误操作。"
         case .unmountRefused: return "卷正在被使用，请关闭正在使用它的程序后再试。"

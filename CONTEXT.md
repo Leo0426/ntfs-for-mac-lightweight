@@ -107,7 +107,9 @@ _Avoid_: Quiet Callback Window, Initial Enumeration Finished
 `VolumeNetwork=true` 的网络卷事件不进入该 inventory，也不参与 IOKit `IOMedia` 集合核对；
 `false`、字段缺失、类型错误或其他未知值都不能被当作网络卷排除，无 BSD 身份时仍永久失败关闭。
 若一个带物理介质 BSD 身份的事件被标为网络卷，独立 IOKit 集合与 DA inventory 的不一致仍会
-阻止 Complete Observation。
+阻止 Complete Observation。具名 file-backed DeviceFS 仅在 [ADR 0014](docs/adr/0014-bound-file-backed-devicefs-observation-scope.md)
+的严格 DA 原始类型/身份缺项、双 IOMedia 查询、稳定挂载表及描述符绑定证据全都一致时，
+作为范围外事件处理；缺失、类型错误、物理身份或收尾不可确认仍失败关闭。没有历史排除缓存。
 _Avoid_: All Disk Arbitration Objects Are Physical Media, Missing BSD Means Network Volume
 
 **Stable Mount Table（稳定挂载表）**:
@@ -242,3 +244,23 @@ _Avoid_: Trusted Snapshot, Persistent Allowlist, Write Capability
 它不证明物理目标、Data Volume Declaration、实盘文件语义、Windows 兼容性或 Gate 通过。
 见 [ADR 0013](docs/adr/0013-verify-runtime-with-disposable-image.md)。
 _Avoid_: FSClient Visibility, Cached Backend Readiness, Physical Disk Authorization
+
+**Process Resource Absence Evidence（进程设备句柄缺席证据）**：
+helper 对仍存活但可执行路径读取返回 ENOENT 的进程，独立取得连续两份完整、稳定的
+文件描述符/vnode 元数据与进程生命周期、内核参数证据；只有确认所有句柄均不是存储设备时，
+才能在当前挂载占用扫描中排除它。未知、权限错误、截断、变化或潜在驱动启动均保留失败关闭。
+它不是进程名称白名单、不证明未来行为，也不替代磁盘变更资格。
+见 [核对记录](docs/research/process-path-and-device-handle-inspection.md)。
+
+绑定写入会话的只读复查按 [ADR 0015](docs/adr/0015-preserve-live-observation-for-bound-write-sessions.md)
+复用当前事件订阅，更新枚举修订并取得新的覆盖/挂载事实，避免把订阅重建分配的新编号当成
+真实物理断开。复用不能继承旧覆盖成功，也不提供跨源结束、唤醒或 App 重启的绑定恢复。
+
+
+**Changed Quiescent Result（已静止的失败结果）**：
+磁盘状态可能已变化，但本次 helper 工作已确认停止；不是可写证明。保留同连接的精确物理绑定，
+只能在新鲜核验后标准释放，不能清除未知租约或重放请求。见 [ADR0016](docs/adr/0016-distinguish-quiescent-failure-and-lifecycle-proof.md)。
+
+**Helper Lifecycle Proof（帮助程序生命周期证明）**：
+签名 helper 先原子封住磁盘准入，再取得无 runtime/driver/probe/DA 活动资源的当前证据，回应独立
+challenge。UI busy=false 或普通 health reachability 不能替代此证明。失败不注销服务，不清未知租约。

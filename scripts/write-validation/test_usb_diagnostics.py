@@ -25,9 +25,12 @@ class USBDiagnosticChecks(unittest.TestCase):
         self.candidate = self.enterContext(patch('usb_lab.candidate', return_value=Path('/fixture/ntfs-3g')))
         self.identity = self.enterContext(patch('usb_lab.filesystem_identity', side_effect=nullcontext))
         self.enterContext(patch('usb_lab.os.geteuid', return_value=0))
+        self.lease = self.enterContext(patch('usb_lab.IsolationLease'))
+        self.lease.return_value.phase = 'leaseOpen'
         self.open = self.enterContext(patch('usb_lab.os.open', return_value=42))
         self.enterContext(patch('usb_lab.os.fstat', return_value=SimpleNamespace(
-            st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1)))
+            st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=1, st_dev=1, st_ino=42)))
+        self.enterContext(patch('usb_lab.os.lstat', return_value=SimpleNamespace(st_dev=1, st_ino=42)))
         self.enterContext(patch('usb_lab.fcntl.flock'))
         self.enterContext(patch('usb_lab.os.close'))
         self.signal = self.enterContext(patch('usb_lab.signal.signal'))
@@ -156,7 +159,7 @@ class USBDiagnosticChecks(unittest.TestCase):
         self.assertNotIn('quiet', usb_lab.OPTIONS.split(','))
 
     def test_lock_failure_reports_phase_and_errno_without_private_error_text(self):
-        self.open.side_effect = OSError(errno.EIO, 'private diagnostic', '/private/secret/path')
+        self.lease.return_value.__enter__.side_effect = OSError(errno.EIO, 'private diagnostic', '/private/secret/path')
         code, report = self.invoke('--run')
         self.assertEqual(code, 1)
         self.assertEqual(report['operation'], 'leaseOpen')

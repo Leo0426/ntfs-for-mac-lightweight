@@ -4,6 +4,7 @@ import NTFSLiteCore
 import NTFSLiteDiagnostics
 import NTFSLitePresentation
 import NTFSLiteSystem
+import NTFSLiteWriteSession
 import SwiftUI
 
 @main
@@ -57,7 +58,10 @@ final class ReadOnlyAppStore: ObservableObject {
     @Published private(set) var diagnosticsText = "尚无诊断记录。"
     private(set) lazy var writeController: WriteController = {
         let controller = WriteController(
-            refreshObservation: { [weak self] in self?.refresh() },
+            service: helperService,
+            transport: DiagnosticHelperTransport(transport: helperTransport, diagnostics: diagnostics),
+            operationCompleted: { [weak self] in await self?.publishDiagnosticsSnapshot() },
+            refreshObservation: { [weak self] in self?.recheckCurrentObservation() },
             canRequestWriting: { [weak self] id in
                 self?.dashboard.volumes.first(where: { $0.id == id })?.actions.canEnableWriting == true
             },
@@ -71,11 +75,20 @@ final class ReadOnlyAppStore: ObservableObject {
         writeControllerObservation = controller.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
+        setupHelperStateObservation = controller.$helperState.removeDuplicates().sink { [weak self] state in
+            self?.acceptHelperState(state)
+        }
         return controller
     }()
 
+    private let helperService: HelperServiceEnvironment
+    private let helperTransport: any HelperTransport
     private let diskObserver: ReadOnlyDiskObserver
     private let setupLoader: SystemSetupFactsLoader
+    private let setupReportProvider: @Sendable (SystemSetupFactsLoader) async -> SystemSetupReport
+    private var currentSetupHelperState: HelperServiceState = .notRegistered
+    private var setupHelperStateObservation: AnyCancellable?
+    private var setupRefreshToken = UUID()
     private let diagnostics: Diagnostics
     private let diagnosticsArchive: DiagnosticSnapshotArchive?
     private let applicationIdentity: DiagnosticApplicationIdentity?
@@ -84,6 +97,7 @@ final class ReadOnlyAppStore: ObservableObject {
     private var setupReport: SystemSetupReport?
     private var isSetupRefreshing = true
     private var observationTask: Task<Void, Never>?
+    private var observationCapture: ReadOnlyDiskObservationCapture?
     private var setupTask: Task<Void, Never>?
     private var diagnosticsDisplayRevision = UUID()
     private var hasStarted = false
@@ -91,15 +105,28 @@ final class ReadOnlyAppStore: ObservableObject {
 
     init(
         diskObserver: ReadOnlyDiskObserver = ReadOnlyDiskObserver(),
-        setupLoader: SystemSetupFactsLoader = SystemSetupFactsLoader(),
+        setupLoader: SystemSetupFactsLoader = SystemSetupFactsLoader(
+            authorizationProvider: SetupAuthorizationStatusProvider {
+                await AppSetupEvidenceReader.currentAuthorizationStatus()
+            },
+            macFUSEPolicy: LocalMacFUSESetupPolicy.current
+        ),
+        setupReportProvider: @escaping @Sendable (SystemSetupFactsLoader) async -> SystemSetupReport = {
+            await AppSetupEvidenceReader.currentReport(using: $0)
+        },
+        helperService: HelperServiceEnvironment = .live,
+        helperTransport: any HelperTransport = HelperXPCTransport(),
         diagnostics: Diagnostics = Diagnostics(),
         diagnosticsArchive: DiagnosticSnapshotArchive? = nil,
         applicationIdentity: DiagnosticApplicationIdentity? = ReadOnlyAppStore
             .currentApplicationIdentity()
     ) {
         let observationSession = ReadOnlyObservationSession()
+        self.helperService = helperService
+        self.helperTransport = helperTransport
         self.diskObserver = diskObserver
         self.setupLoader = setupLoader
+        self.setupReportProvider = setupReportProvider
         self.diagnostics = diagnostics
         self.diagnosticsArchive = diagnosticsArchive ?? Self.currentDiagnosticsArchive()
         self.applicationIdentity = applicationIdentity
@@ -113,6 +140,7 @@ final class ReadOnlyAppStore: ObservableObject {
     }
 
     deinit {
+        observationCapture?.stopImmediately()
         observationTask?.cancel()
         setupTask?.cancel()
     }
@@ -126,36 +154,77 @@ final class ReadOnlyAppStore: ObservableObject {
         refresh()
     }
 
-    func refresh() {
-        writeController.refreshHelperState()
-        let revision = observationSession.beginRefresh()
-        selectionResetEpoch = observationSession.selectionResetEpoch
-        observationTask?.cancel()
+    /// Refresh only the diagnostic report; helper state notifications never call
+    /// this method, so revocation cannot start a recursive chain of XPC checks.
+    func refreshSetup() {
         setupTask?.cancel()
-
+        setupRefreshToken = UUID()
+        let token = setupRefreshToken
         isSetupRefreshing = true
         setupReport = nil
         render()
-
-        setupTask = Task { [weak self, setupLoader] in
-            let report = await setupLoader.currentReport()
-            guard !Task.isCancelled,
-                  let self,
-                  self.observationSession.isCurrent(revision)
-            else {
-                return
-            }
-            self.setupReport = report
-            self.setupAssessment = SetupChecker.assess(report.reconciledFacts)
+        setupTask = Task { [weak self, setupLoader, setupReportProvider] in
+            let report = await setupReportProvider(setupLoader)
+            guard !Task.isCancelled, let self, self.setupRefreshToken == token else { return }
+            let finalReport = self.reportMatchingCurrentHelperState(report)
+            self.setupReport = finalReport
+            self.setupAssessment = SetupChecker.assess(finalReport.reconciledFacts)
             self.isSetupRefreshing = false
             self.render()
-            await self.recordSetupDiagnostics(report: report)
+            await self.recordSetupDiagnostics(report: finalReport)
         }
+    }
+
+    private func reportMatchingCurrentHelperState(_ report: SystemSetupReport) -> SystemSetupReport {
+        guard currentSetupHelperState != .enabled else { return report }
+        let authorization: SetupAuthorizationStatus = currentSetupHelperState == .requiresApproval
+            || currentSetupHelperState == .notRegistered ? .denied : .unknown
+        return report.recordingAuthorization(authorization)
+    }
+
+    /// Consumes the same typed helper state used by the visible controller.
+    /// This only revokes diagnostic evidence; it cannot approve disk operations.
+    func acceptHelperState(_ state: HelperServiceState) {
+        currentSetupHelperState = state
+        guard state != .enabled, let report = setupReport else { return }
+        let revokedReport = reportMatchingCurrentHelperState(report)
+        setupReport = revokedReport
+        setupAssessment = SetupChecker.assess(revokedReport.reconciledFacts)
+        render()
+    }
+
+    /// Revalidate post-operation facts without replacing this connection's identity scope.
+    func recheckCurrentObservation() {
+        writeController.refreshHelperState()
+        refreshSetup()
+        if observationCapture?.refresh() == true { return }
+        // An ended source cannot prove absence or safely rebind an active operation.
+        if !writeController.hasBoundDiskSession { refresh(restartObservation: true) }
+    }
+
+    func refresh(restartObservation: Bool = false) {
+        if !restartObservation, writeController.hasBoundDiskSession {
+            recheckCurrentObservation()
+            return
+        }
+        writeController.refreshHelperState()
+        refreshSetup()
+        observationCapture?.stopImmediately()
+        observationCapture = nil
+        let revision = observationSession.beginRefresh()
+        selectionResetEpoch = observationSession.selectionResetEpoch
+        observationTask?.cancel()
 
         observationTask = Task { [weak self, diskObserver] in
             do {
-                let observations = try diskObserver.observations()
-                for await observation in observations {
+                let capture = try diskObserver.capture()
+                guard self?.observationSession.isCurrent(revision) == true else {
+                    capture.stopImmediately()
+                    return
+                }
+                self?.observationCapture = capture
+                for await event in capture.events {
+                    guard case let .observation(observation) = event else { continue }
                     guard !Task.isCancelled,
                           let self,
                           self.observationSession.isCurrent(revision)
@@ -258,7 +327,7 @@ final class ReadOnlyAppStore: ObservableObject {
         }
     }
 
-    private func publishDiagnosticsSnapshot() async {
+    func publishDiagnosticsSnapshot() async {
         let revision = UUID()
         diagnosticsDisplayRevision = revision
         do {
@@ -382,7 +451,17 @@ extension Notification.Name {
 
 @MainActor
 final class ReadOnlyAppDelegate: NSObject, NSApplicationDelegate {
-    private let store = ReadOnlyAppStore()
+    private let store: ReadOnlyAppStore
+
+    override init() {
+        self.store = ReadOnlyAppStore()
+        super.init()
+    }
+
+    init(store: ReadOnlyAppStore) {
+        self.store = store
+        super.init()
+    }
     private var statusItem: NSStatusItem?
     private var menuSummaryItem: NSMenuItem?
     private var mainWindowController: NSWindowController?
@@ -407,10 +486,21 @@ final class ReadOnlyAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidBecomeActive(_ notification: Notification) {
         store.writeController.refreshHelperState()
+        store.refreshSetup()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
+    }
+
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        // SwiftUI only owns Settings; the main page is our retained AppKit window.
+        // Handle Dock reopening explicitly, including when Settings remains visible.
+        openMainWindow()
+        return false
     }
 
     private func installStatusItem() {
@@ -473,7 +563,7 @@ final class ReadOnlyAppDelegate: NSObject, NSApplicationDelegate {
             .store(in: &cancellables)
     }
 
-    private func installMainWindow() {
+    func installMainWindow() {
         let rootView = ReadOnlyMainWindow(store: store)
         let hostingController = NSHostingController(rootView: rootView)
         let window = NSWindow(
@@ -496,6 +586,9 @@ final class ReadOnlyAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openMainWindow() {
+        if mainWindowController?.window?.isMiniaturized == true {
+            mainWindowController?.window?.deminiaturize(nil)
+        }
         mainWindowController?.showWindow(nil)
         mainWindowController?.window?.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
@@ -507,7 +600,7 @@ final class ReadOnlyAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func refreshAfterWake() {
-        store.refresh()
+        store.refresh(restartObservation: true)
     }
 
     @objc private func terminate() {

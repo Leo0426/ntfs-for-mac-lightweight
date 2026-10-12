@@ -52,6 +52,9 @@ public struct SystemMountRecord: Equatable, Sendable {
     public let isSymlink: Bool
     public let fileSystemUUID: String?
     public let isComplete: Bool
+    public let fileSystemID: [Int32]?
+    public let isLocal: Bool?
+    public let isFSKit: Bool?
 
     public init(
         sourcePath: String,
@@ -63,7 +66,10 @@ public struct SystemMountRecord: Equatable, Sendable {
         isCanonical: Bool,
         isSymlink: Bool,
         fileSystemUUID: String? = nil,
-        isComplete: Bool = true
+        isComplete: Bool = true,
+        fileSystemID: [Int32]? = nil,
+        isLocal: Bool? = nil,
+        isFSKit: Bool? = nil
     ) {
         self.sourcePath = sourcePath
         self.sourceBSDName = sourceBSDName
@@ -75,6 +81,9 @@ public struct SystemMountRecord: Equatable, Sendable {
         self.isSymlink = isSymlink
         self.fileSystemUUID = fileSystemUUID
         self.isComplete = isComplete
+        self.fileSystemID = fileSystemID
+        self.isLocal = isLocal
+        self.isFSKit = isFSKit
     }
 
     public var volumeEvidence: ReadOnlyMountEvidence? {
@@ -222,7 +231,11 @@ public struct SystemMountTableReader: Sendable {
             isCanonical: pathAssessment.isCanonical,
             isSymlink: pathAssessment.isSymlink,
             fileSystemUUID: fileSystemUUID,
-            isComplete: !readsIdentity || fileSystemUUID != nil
+            isComplete: (!readsIdentity || fileSystemUUID != nil)
+                && (fileSystemName != "devicefs" || MountedDeviceFSReader.isBound(to: fileSystem)),
+            fileSystemID: [fileSystem.f_fsid.val.0, fileSystem.f_fsid.val.1],
+            isLocal: (fileSystem.f_flags & UInt32(MNT_LOCAL)) != 0,
+            isFSKit: (fileSystem.f_flags_ext & UInt32(MNT_EXT_FSKIT)) != 0
         )
     }
 

@@ -257,6 +257,9 @@ public actor ReadOnlyDiskInventory: DiskInventoryReading {
         guard event.description.isNetworkVolume != true else {
             return
         }
+        if isVerifiedNonPhysicalVolume(event.description) {
+            return
+        }
         guard let bsdName = normalized(event.description.bsdName) else {
             receivedUnidentifiedDiskEvent = true
             return
@@ -284,6 +287,19 @@ public actor ReadOnlyDiskInventory: DiskInventoryReading {
                     normalized(description.physicalDiskBSDName) != bsdName
                 }
             }
+        }
+    }
+
+    private func isVerifiedNonPhysicalVolume(_ description: DiskArbitrationDescription) -> Bool {
+        guard description.fileSystemName == "devicefs", description.bsdName == nil else {
+            return false
+        }
+        do {
+            let first = try mountTableProvider.currentSnapshot()
+            let second = try mountTableProvider.currentSnapshot()
+            return NonPhysicalVolumeScope.isVerifiedDeviceFS(description, first: first, second: second)
+        } catch {
+            return false
         }
     }
 

@@ -51,7 +51,7 @@ let processor = HelperRequestProcessor { request in
     guard await !LiveWritableMountSystem.runtimeProbe.isHoldingResources(
         persistentQualification: LiveRuntimeProbeSystem.persistentQualification()
     ) else {
-        return HelperResponseEnvelope(resultCode: .rejectedDiskBusy, exitStatus: 0)
+        return HelperResponseEnvelope.runtimeResourcesHeld
     }
     switch (request.action, request.target) {
     case let (.mountReadWrite, .volume(target)):
@@ -111,6 +111,23 @@ final class HelperService: NSObject, NTFSLiteHelperXPC {
               let response = HelperHealthCheck.response(for: challenge)
         else { reply(Data()); return }
         reply(response)
+    }
+
+    func prepareForReregistration(_ challenge: Data, withReply reply: @escaping @Sendable (Data) -> Void) {
+        guard IdleExit.shared.begin() else { reply(Data()); return }
+        Task {
+            defer { IdleExit.shared.end() }
+            guard deploymentIsTrusted(requireRootProcess: true),
+                  let response = HelperMaintenanceCheck.response(for: challenge),
+                  await processor.prepareForMaintenance(checkResources: {
+                    guard await !LiveWritableMountSystem.runtimeProbe.isHoldingResources(
+                        persistentQualification: LiveRuntimeProbeSystem.persistentQualification()),
+                        let system else { return false }
+                    return await system.isDriverFreeForMaintenance()
+                  })
+            else { reply(Data()); return }
+            reply(response)
+        }
     }
 
     func submit(_ request: Data, withReply reply: @escaping @Sendable (Data) -> Void) {

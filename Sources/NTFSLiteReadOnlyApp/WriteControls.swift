@@ -1,7 +1,9 @@
 import AppKit
 import Foundation
 import NTFSLiteCore
+import NTFSLiteDiagnostics
 import NTFSLiteHelperProtocol
+import NTFSLiteHelperExecution
 import NTFSLitePresentation
 import NTFSLiteProtectedInstall
 import NTFSLiteSystem
@@ -13,6 +15,41 @@ import SwiftUI
 private func announceWriteStatus(_ text: String) {
     guard !text.isEmpty else { return }
     AccessibilityNotification.Announcement(text).post()
+}
+
+/// Read-only current product evidence. No registration, disk mutation, or cached
+/// runtime image result enters this report.
+enum AppSetupEvidenceReader {
+    static func protectedInstallationIsTrusted() -> Bool {
+        SecureHelperDeployment.verifyInstalled(
+            appIdentifier: HelperServiceIdentity.appIdentifier,
+            helperIdentifier: HelperServiceIdentity.helperIdentifier,
+            driverIdentifier: SecureHelperDeployment.driverIdentifier,
+            probeIdentifier: SecureHelperDeployment.probeIdentifier,
+            teamIdentifier: HelperServiceIdentity.teamIdentifier
+        )
+    }
+
+    static func currentReport(using loader: SystemSetupFactsLoader) async -> SystemSetupReport {
+        await SystemSetupReportFinalizer.currentReport(
+            using: loader,
+            authorizationProvider: SetupAuthorizationStatusProvider { await currentAuthorizationStatus() },
+            installationVerifier: { protectedInstallationIsTrusted() }
+        )
+    }
+
+    static func currentAuthorizationStatus() async -> SetupAuthorizationStatus {
+        let service = SMAppService.daemon(plistName: HelperServiceIdentity.daemonPlistName)
+        guard protectedInstallationIsTrusted() else { return .unknown }
+        switch service.status {
+        case .requiresApproval, .notRegistered: return .denied
+        case .enabled:
+            let reachable = await HelperXPCTransport().healthCheck()
+            guard reachable, protectedInstallationIsTrusted(), service.status == .enabled else { return .unknown }
+            return .granted
+        default: return .unknown
+        }
+    }
 }
 
 /// XPC transport to the privileged helper (ADR 0010/0011). A connection that cannot be
@@ -35,6 +72,24 @@ struct HelperXPCTransport: HelperTransport {
             guard let proxy else { once.resume(false); return }
             proxy.healthCheck(challenge) { reply in
                 once.resume(HelperHealthCheck.accepts(reply, for: challenge))
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + Self.healthTimeout) { once.resume(false) }
+        }
+    }
+
+    func prepareForReregistration() async -> Bool {
+        await withCheckedContinuation { continuation in
+            let connection = NSXPCConnection(machServiceName: HelperServiceIdentity.machServiceName, options: .privileged)
+            connection.remoteObjectInterface = NSXPCInterface(with: NTFSLiteHelperXPC.self)
+            connection.setCodeSigningRequirement(HelperServiceIdentity.helperRequirement)
+            let once = ResumeOnce(continuation, connection: connection)
+            var bytes = UUID().uuid
+            let challenge = withUnsafeBytes(of: &bytes) { Data($0) }
+            connection.resume()
+            let proxy = connection.remoteObjectProxyWithErrorHandler { _ in once.resume(false) } as? NTFSLiteHelperXPC
+            guard let proxy else { once.resume(false); return }
+            proxy.prepareForReregistration(challenge) { reply in
+                once.resume(HelperMaintenanceCheck.accepts(reply, for: challenge))
             }
             DispatchQueue.global().asyncAfter(deadline: .now() + Self.healthTimeout) { once.resume(false) }
         }
@@ -80,6 +135,139 @@ private final class ResumeOnce<Value: Sendable>: @unchecked Sendable {
         guard let pending else { return }
         connection.invalidate()
         pending.resume(returning: result)
+    }
+}
+
+/// Records each submitted fixed action before its outcome reaches the controller.
+/// Target identity stays in memory; archives receive only Diagnostics numeric aliases.
+actor DiagnosticHelperTransport: HelperTransport {
+    private struct WireRequest: Decodable {
+        let operationID: HelperOperationID
+        let action: HelperAction
+        let target: HelperTarget
+    }
+    private let transport: any HelperTransport
+    private let diagnostics: Diagnostics
+    private var targets: [String: DiagnosticTarget] = [:]
+
+    init(transport: any HelperTransport, diagnostics: Diagnostics) {
+        self.transport = transport
+        self.diagnostics = diagnostics
+    }
+
+    private static func resultStage(action: HelperAction, response: HelperResponseEnvelope) -> DiagnosticOperationStage {
+        if response.resultCode == .rejectedRuntimeResourcesHeld { return .inspectSafety }
+        if response.resultCode == .succeeded {
+            switch action {
+            case .mountReadWrite: return .inspectWriteMount
+            case .unmountVolume, .unmountDisk: return .inspectPhysicalDiskAfterUnmount
+            case .ejectDisk: return .inspectPhysicalDiskAfterEject
+            }
+        }
+        guard response.resultCode == .executionFailed || response.resultCode == .stateChangedQuiescent
+            || response.resultCode == .postconditionFailed else { return .reconcile }
+        if action == .mountReadWrite, let failure = WritableMountFailure(rawValue: response.exitStatus) {
+            switch failure {
+            case .nativeUnmountFailed: return .unmountReadOnly
+            case .driverStartFailed: return .mountWrite
+            case .mountNotObserved, .mountNotVerified: return .inspectWriteMount
+            default: return .inspectSafety
+            }
+        }
+        if let failure = DiskReleaseFailure(rawValue: response.exitStatus) {
+            switch failure {
+            case .driverNotExited: return .waitForProcessExit
+            case .unmountRefused: return .unmountPhysicalDisk
+            case .stillMounted, .mountPointNotRemoved: return .inspectPhysicalDiskAfterUnmount
+            case .ejectRefused: return .ejectPhysicalDisk
+            case .ejectNotConfirmed: return .inspectPhysicalDiskAfterEject
+            default: return .inspectSafety
+            }
+        }
+        return .reconcile
+    }
+
+    func send(_ data: Data) async -> HelperTransportResult {
+        let started = ContinuousClock.now
+        let result = await transport.send(data)
+        guard let request = try? JSONDecoder().decode(WireRequest.self, from: data) else { return result }
+        let disk: HelperDiskInstanceIdentity
+        switch request.target {
+        case let .disk(identity): disk = identity
+        case let .volume(identity): disk = identity.disk
+        }
+        var stage: DiagnosticOperationStage
+        switch request.action {
+        case .mountReadWrite: stage = .mountWrite
+        case .unmountDisk: stage = .unmountPhysicalDisk
+        case .ejectDisk: stage = .ejectPhysicalDisk
+        case .unmountVolume: stage = .unmountReadOnly
+        }
+        var code: Int32?
+        let certainty: DiagnosticResultCertainty
+        let diagnosticResult: DiagnosticResultCode
+        switch result {
+        case .unavailable: stage = .reconcile; certainty = .unchanged; diagnosticResult = .dependencyUnavailable
+        case .timedOut: stage = .reconcile; certainty = .unknown; diagnosticResult = .timedOut
+        case let .reply(reply):
+            if case let .success(response) = HelperResponseDecoder().decode(reply) {
+                code = response.exitStatus
+                stage = Self.resultStage(action: request.action, response: response)
+                let knownStage = request.action == .mountReadWrite
+                    ? WritableMountFailure(rawValue: response.exitStatus) != nil
+                    : DiskReleaseFailure(rawValue: response.exitStatus) != nil
+                switch response.resultCode {
+                case .succeeded: certainty = .verified; diagnosticResult = .succeeded
+                case .stateChangedQuiescent:
+                    certainty = knownStage ? .changedQuiescent : .unknown; diagnosticResult = .engineFailed
+                case .executionFailed:
+                    certainty = knownStage ? .unchanged : .unknown; diagnosticResult = .engineFailed
+                case .postconditionFailed: certainty = .unknown; diagnosticResult = .inspectionUnavailable
+                case .rejectedRuntimeResourcesHeld: certainty = .unchanged; diagnosticResult = .engineFailed
+                default: certainty = .unchanged; diagnosticResult = .rejected
+                }
+            } else { stage = .reconcile; certainty = .unknown; diagnosticResult = .inspectionUnavailable }
+        }
+        do {
+            let key = "\(disk.physicalDiskBSDName):\(disk.mediaGeneration):\(disk.registryEntryID)"
+            let elapsed = started.duration(to: .now).components
+            let milliseconds = UInt64(max(0, elapsed.seconds)) * 1_000 + UInt64(max(0, elapsed.attoseconds / 1_000_000_000_000_000))
+            let kind: DiagnosticOperationKind = request.action == .mountReadWrite ? .enableWriting : .safeEject
+            let traceID = UUID(uuidString: request.operationID.rawValue)
+            targets[key] = try await diagnostics.recordDiskOperation(
+                reusing: targets[key], mediaGeneration: disk.mediaGeneration
+            ) { [stage, code] target in
+                DiagnosticOperationEvent(
+                    target: target, kind: kind, stage: stage, result: diagnosticResult,
+                    exitStatus: nil, elapsedMilliseconds: milliseconds,
+                    traceID: traceID, helperStageCode: code, certainty: certainty
+                )
+            }
+        } catch {
+            // Diagnostic failure cannot promote any disk result or authorize a retry.
+        }
+        return result
+    }
+}
+
+/// Structured injectable service boundary; production actions retain SMAppService and signed XPC.
+@MainActor
+struct HelperServiceEnvironment {
+    var status: () -> SMAppService.Status
+    var trust: () -> Bool
+    var protectedLaunch: () -> Bool
+    var register: () throws -> Void
+    var unregister: () async throws -> Void
+    var health: () async -> Bool
+    var prepare: () async -> Bool
+
+    static var live: Self {
+        let service = SMAppService.daemon(plistName: HelperServiceIdentity.daemonPlistName)
+        return Self(status: { service.status }, trust: { AppSetupEvidenceReader.protectedInstallationIsTrusted() },
+                    protectedLaunch: { HelperEnablementUI.shouldOfferRegistration(for: Bundle.main.bundleURL) },
+                    register: { try service.register() }, unregister: { try await service.unregister() },
+                    health: { await HelperXPCTransport().healthCheck() },
+                    prepare: { await HelperXPCTransport().prepareForReregistration() })
     }
 }
 
@@ -135,6 +323,8 @@ final class WriteController: ObservableObject {
     @Published private(set) var busyDisks: Set<PhysicalDiskID> = []
     @Published private(set) var progressByDisk: [PhysicalDiskID: String] = [:]
     @Published private(set) var writableVolumes: [WriteVolumeRecord] = []
+    @Published private(set) var releasePendingVolumes: [WriteVolumeRecord] = []
+    var sessionVolumes: [WriteVolumeRecord] { writableVolumes + releasePendingVolumes }
     @Published private(set) var sessionEjectableVolumes: Set<VolumeInstanceID> = []
     @Published private(set) var lastMessage: String?
     @Published private(set) var recentNotices: [WriteNotice] = []
@@ -142,8 +332,9 @@ final class WriteController: ObservableObject {
     @Published private(set) var isReregisteringHelper = false
     @Published private(set) var lastOutcomeByDisk: [DiskInstanceID: WriteOutcome] = [:]
 
-    private let session = WriteSession(transport: HelperXPCTransport())
-    private let service = SMAppService.daemon(plistName: HelperServiceIdentity.daemonPlistName)
+    private let session: WriteSession
+    private let service: HelperServiceEnvironment
+    private let operationCompleted: @MainActor () async -> Void
     private let refreshObservation: @MainActor () -> Void
     private let canRequestWriting: @MainActor (VolumeInstanceID) -> Bool
     private let canRequestEject: @MainActor (DiskInstanceID) -> Bool
@@ -155,21 +346,19 @@ final class WriteController: ObservableObject {
     private var nextSessionDiskNumber = 1
     private var helperCheckToken = UUID()
 
-    private func protectedInstallationIsTrusted() -> Bool {
-        SecureHelperDeployment.verifyInstalled(
-            appIdentifier: HelperServiceIdentity.appIdentifier,
-            helperIdentifier: HelperServiceIdentity.helperIdentifier,
-            driverIdentifier: SecureHelperDeployment.driverIdentifier,
-            probeIdentifier: SecureHelperDeployment.probeIdentifier,
-            teamIdentifier: HelperServiceIdentity.teamIdentifier
-        )
-    }
+    private func protectedInstallationIsTrusted() -> Bool { service.trust() }
 
     init(
+        service: HelperServiceEnvironment = .live,
+        transport: any HelperTransport = HelperXPCTransport(),
+        operationCompleted: @escaping @MainActor () async -> Void = {},
         refreshObservation: @escaping @MainActor () -> Void,
         canRequestWriting: @escaping @MainActor (VolumeInstanceID) -> Bool,
         canRequestEject: @escaping @MainActor (DiskInstanceID) -> Bool
     ) {
+        self.service = service
+        self.session = WriteSession(transport: transport)
+        self.operationCompleted = operationCompleted
         self.refreshObservation = refreshObservation
         self.canRequestWriting = canRequestWriting
         self.canRequestEject = canRequestEject
@@ -177,9 +366,10 @@ final class WriteController: ObservableObject {
     }
 
     func refreshHelperState() {
+        guard !isReregisteringHelper else { return }
         helperCheckToken = UUID()
         let token = helperCheckToken
-        guard HelperEnablementUI.shouldOfferRegistration(for: Bundle.main.bundleURL) else {
+        guard service.protectedLaunch() else {
             helperState = .requiresProtectedInstallation
             helperMessage = nil
             return
@@ -189,18 +379,18 @@ final class WriteController: ObservableObject {
             helperMessage = "受保护安装件的属主、权限、文件清单或签名无法核验；请重新安装后检查。"
             return
         }
-        switch service.status {
+        switch service.status() {
         case .enabled:
             helperState = .checkingConnection
             Task {
-                let reachable = await HelperXPCTransport().healthCheck()
+                let reachable = await service.health()
                 guard helperCheckToken == token else { return }
                 guard protectedInstallationIsTrusted() else {
                     helperState = .unavailable
                     helperMessage = "受保护安装件已无法核验；当前不开放磁盘操作。"
                     return
                 }
-                switch service.status {
+                switch service.status() {
                 case .enabled:
                     helperState = reachable ? .enabled : .unreachable
                     if reachable { helperMessage = nil }
@@ -226,7 +416,7 @@ final class WriteController: ObservableObject {
     }
 
     func installHelper() {
-        guard HelperEnablementUI.shouldOfferRegistration(for: Bundle.main.bundleURL) else {
+        guard service.protectedLaunch() else {
             helperState = .requiresProtectedInstallation
             return
         }
@@ -236,7 +426,7 @@ final class WriteController: ObservableObject {
             return
         }
         guard helperState.canAttemptRegistration else { return }
-        guard service.status == .notRegistered || service.status == .notFound else {
+        guard service.status() == .notRegistered || service.status() == .notFound else {
             refreshHelperState()
             return
         }
@@ -267,7 +457,7 @@ final class WriteController: ObservableObject {
     /// Unregisters the enabled-but-unreachable service, waits for the system to finish, and
     /// registers it again so Background Task Management rebuilds its records for this bundle.
     func reregisterHelper() {
-        guard HelperEnablementUI.shouldOfferRegistration(for: Bundle.main.bundleURL) else {
+        guard service.protectedLaunch() else {
             helperState = .requiresProtectedInstallation
             return
         }
@@ -276,21 +466,28 @@ final class WriteController: ObservableObject {
             helperMessage = "受保护安装件的属主、权限、文件清单或签名无法核验；不能重新注册帮助程序。"
             return
         }
-        guard !isReregisteringHelper,
-              HelperReregistrationPolicy.mayProceed(
-                  state: helperState,
-                  systemReportsEnabled: service.status == .enabled,
-                  hasBusyDisk: !busyDisks.isEmpty
-              ) else {
-            refreshHelperState()
+        guard !isReregisteringHelper, helperState.canAttemptReregistration,
+              service.status() == .enabled, !hasBoundDiskSession else {
+            helperMessage = "当前存在绑定磁盘会话或状态无法确认，不能注销帮助程序。"
             return
         }
         isReregisteringHelper = true
         helperCheckToken = UUID()
         helperState = .unavailable
-        helperMessage = "正在注销并重新注册帮助程序，请稍候。"
+        helperMessage = "正在取得帮助程序的新鲜全局静止证明，请稍候。"
         Task { @MainActor in
             defer { isReregisteringHelper = false }
+            let proof = await service.prepare()
+            guard proof, service.protectedLaunch(), protectedInstallationIsTrusted(),
+                  HelperReregistrationPolicy.mayProceed(
+                    state: .unreachable, systemReportsEnabled: service.status() == .enabled,
+                    hasBusyDisk: !busyDisks.isEmpty, hasBoundDiskSession: hasBoundDiskSession,
+                    hasFreshQuiescenceProof: proof
+                  ) else {
+                helperState = .unreachable
+                helperMessage = "未取得有效的全局静止证明或当前条件已变化；未注销帮助程序。"
+                return
+            }
             do {
                 try await service.unregister()
             } catch {
@@ -305,7 +502,7 @@ final class WriteController: ObservableObject {
                 helperMessage = "帮助程序已注销，但受保护安装件已无法核验；未重新注册。"
                 return
             }
-            guard service.status == .notRegistered || service.status == .notFound else {
+            guard service.status() == .notRegistered || service.status() == .notFound else {
                 helperMessage = "帮助程序注销后系统状态无法确认，未重新注册。请重新检查。"
                 refreshHelperState()
                 return
@@ -318,6 +515,7 @@ final class WriteController: ObservableObject {
                 helperMessage = "帮助程序已注销，但重新注册未完成。请重新检查状态与系统批准。"
                     + HelperRegistrationDiagnostic.suffix(domain: failure.domain, code: failure.code)
             }
+            isReregisteringHelper = false
             refreshHelperState()
             if helperState == .requiresApproval {
                 SMAppService.openSystemSettingsLoginItems()
@@ -343,6 +541,10 @@ final class WriteController: ObservableObject {
         }
     }
 
+    var hasBoundDiskSession: Bool {
+        !sessionVolumes.isEmpty || !busyDisks.isEmpty || !ledger.unresolvedDisks.isEmpty
+    }
+
     func isBusy(_ disk: DiskInstanceID) -> Bool { busyDisks.contains(disk.physicalDiskID) }
 
     func isWritable(_ volume: VolumeInstanceID) -> Bool { writableVolumes.contains { $0.id == volume } }
@@ -352,7 +554,88 @@ final class WriteController: ObservableObject {
     func sessionDiskLabel(for disk: DiskInstanceID) -> String? { sessionDiskLabels[disk] }
 
     func canEjectSessionVolume(_ volume: VolumeInstanceID) -> Bool {
-        isWritable(volume) && sessionEjectableVolumes.contains(volume)
+        sessionVolumes.contains { $0.id == volume } && sessionEjectableVolumes.contains(volume)
+    }
+
+    func overviewExplanation(for dashboard: ReadOnlyDashboardPresentation) -> (title: String, detail: String) {
+        let original = (title: dashboard.title, detail: dashboard.detail)
+        guard dashboard.phase == .limited, helperState == .enabled, !isReregisteringHelper,
+              let observation = latestObservation, observation.issues.isEmpty else { return original }
+        var hasPendingNativeIdentity = false
+        var hasUnclassifiedFUSESource = false
+        var hasOtherUnconfirmedDisk = false
+        for disk in observation.physicalDisks {
+            // This explanation concerns retained external NTFS sessions. Typed APFS
+            // container omissions are separate from NTFS identity failures; generic
+            // FUSE sources retain the original warning. No capability is changed.
+            if disk.volumes.isEmpty {
+                guard !sessionVolumes.contains(where: { $0.id.diskInstanceID == disk.instanceID }) else { return original }
+                // No rows means unknown, not non-NTFS. Keep the full original
+                // warning alongside the independently verified session context.
+                hasOtherUnconfirmedDisk = true
+                continue
+            }
+            for volume in disk.volumes {
+                if volume.isRecognizedUnMountedEFIPartition(on: disk) { continue }
+                let fileSystem = volume.evidence.fileSystemName?.lowercased()
+                let content = volume.evidence.mediaContent?.lowercased()
+                let looksNTFS = fileSystem == "ntfs" || content == "windows_ntfs"
+                    || content == "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7"
+                    || volume.evidence.mediaContentHint?.lowercased() == "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7"
+                if !looksNTFS {
+                    if fileSystem == "macfuse" {
+                        // macFUSE is a generic platform, not proof that this row
+                        // is unrelated to NTFS. Keep the original global warning.
+                        hasUnclassifiedFUSESource = true
+                        continue
+                    }
+                    let apfsContainer = content == "7c3457ef-0000-11aa-aa11-00306543ecac"
+                        || content == "41504653-0000-11aa-aa11-00306543ecac"
+                    let builtInContainer = disk.description.isInternal == true && (
+                        content == "69646961-6700-11aa-aa11-00306543ecac"
+                        || content == "52637672-7900-11aa-aa11-00306543ecac"
+                    )
+                    guard fileSystem == "apfs" || apfsContainer || builtInContainer else { return original }
+                    // Only the omissions observed on the system's APFS/container
+                    // records are presentation-neutral; conflicts remain visible.
+                    guard disk.issues.allSatisfy({ issue in
+                        if case let .missingPhysicalLocation(name) = issue {
+                            return name == disk.description.bsdName && disk.description.isInternal == nil
+                        }
+                        return false
+                    }), volume.issues.allSatisfy({ issue in
+                        switch issue {
+                        case .missingVolumeUUID, .missingDisplayName, .missingFileSystemName,
+                             .missingLocation, .unknownVolumeRole: return true
+                        default: return false
+                        }
+                    }) else { return original }
+                    continue
+                }
+                guard disk.issues.isEmpty, disk.description.isInternal == false,
+                      volume.issues.allSatisfy({ issue in
+                          issue == .unknownVolumeRole || issue == .missingDisplayName || issue == .missingVolumeUUID
+                      }) else { return original }
+                guard volume.issues.contains(.missingVolumeUUID) else { continue }
+                guard volume.evidence.volumeUUID == nil, volume.snapshot == nil, volume.candidate == nil,
+                      fileSystem == "ntfs",
+                      let record = writableVolumes.first(where: {
+                          $0.id.diskInstanceID == disk.instanceID && $0.id.volumeID.bsdName == volume.evidence.bsdName
+                      }), !isBusy(disk.instanceID), !isUnresolved(disk.instanceID),
+                      canEjectSessionVolume(record.id) else { return original }
+                hasPendingNativeIdentity = true
+            }
+        }
+        guard hasPendingNativeIdentity else { return original }
+        var detail = "原生分区身份待确认，请用下方会话安全推出。操作记录不代表当前已验证可写；帮助程序仍会核对当前整盘事实。"
+        if hasUnclassifiedFUSESource {
+            detail += " 其他 FUSE 挂载的身份与物理信息仍待确认。"
+        }
+        if hasOtherUnconfirmedDisk {
+            detail += " 另有无卷信息的磁盘，身份与物理信息仍待确认。"
+        }
+        if hasUnclassifiedFUSESource || hasOtherUnconfirmedDisk { detail += original.detail }
+        return ("本次会话已启用写入", detail)
     }
 
     func canOpenSessionFinder(_ volume: VolumeInstanceID) -> Bool {
@@ -371,21 +654,28 @@ final class WriteController: ObservableObject {
         latestObservation = observation
         let coverageVerified = observation.issues.isEmpty
         let disks = Set(observation.physicalDisks.map(\.instanceID))
-        let previousRecords = writableVolumes
+        let previousRecords = sessionVolumes
         ledger.reconcileObservedDisks(disks, coverageVerified: coverageVerified)
         if coverageVerified {
             observedDisks = disks
         }
         observationCoverageVerified = coverageVerified
         writableVolumes.removeAll { !ledger.writableVolumes.contains($0.id) }
-        sessionEjectableVolumes = Set(writableVolumes.filter { record in
+        releasePendingVolumes.removeAll { !ledger.releasePendingVolumes.contains($0.id) }
+        sessionEjectableVolumes = Set(sessionVolumes.filter { record in
             WriteSession.canOfferSessionEject(
                 record.id.diskInstanceID,
                 binding: record.binding,
                 in: observation
             )
         }.map(\.id))
-        let disconnected = previousRecords.filter { !ledger.writableVolumes.contains($0.id) }
+        // Fresh absence immediately revokes session actions. While a helper operation
+        // is pending, its terminal result owns the explanation; absence is not a
+        // reason to blame a user disconnect or infer successful eject.
+        let disconnected = previousRecords.filter {
+            !ledger.writableVolumes.contains($0.id) && !ledger.releasePendingVolumes.contains($0.id)
+                && !isBusy($0.id.diskInstanceID)
+        }
         if !disconnected.isEmpty {
             let targets = disconnected.map(\.displayName).joined(separator: "、")
             lastMessage = "\(targets)已断开，本次会话记录已清除；无法确认曾安全推出。若已直接拔出，请检查磁盘状态。"
@@ -394,12 +684,39 @@ final class WriteController: ObservableObject {
         }
     }
 
-    func enableWriting(_ volume: VolumeInstanceID, title: String) {
-        guard helperState == .enabled, canRequestWriting(volume),
-              let observation = latestObservation else { return }
+    @discardableResult
+    func enableWriting(_ volume: VolumeInstanceID, title: String) -> Bool {
+        func refuse(_ reason: String) -> Bool {
+            let message = "\(title)：本次写入请求未提交。" + reason
+            lastMessage = message
+            recordNotice(message, requiresAttention: true)
+            return false
+        }
+        guard !isReregisteringHelper, helperState == .enabled else {
+            return refuse(helperState == .checkingConnection
+                ? "正在验证后台连接，请等待检查完成后再次确认。"
+                : helperState.text + " 请在运行环境中检查帮助程序。")
+        }
+        guard !isBusy(volume.diskInstanceID) else {
+            return refuse("这块磁盘正在处理另一项请求，请等待结果。")
+        }
+        guard !sessionVolumes.contains(where: { $0.id.diskInstanceID.physicalDiskID == volume.diskInstanceID.physicalDiskID }) else {
+            return refuse("本次连接已有写入或待释放会话，请先完成安全推出。")
+        }
+        guard !isUnresolved(volume.diskInstanceID) else {
+            return refuse("上次操作结果尚未确认，不能再次提交。")
+        }
+        guard let observation = latestObservation else {
+            return refuse("尚未取得当前磁盘信息，请重新读取。")
+        }
+        guard canRequestWriting(volume) else {
+            return refuse("当前操作条件正在复核或已变化。请等待检查完成；若仍无法提交，请重新读取并选择目标卷。")
+        }
         guard let binding = WriteSession.diskIdentity(
             volume.diskInstanceID, target: volume, in: observation
-        ) else { return }
+        ) else {
+            return refuse("当前卷身份或分区信息未通过核对，请重新读取并选择目标卷。")
+        }
         let diskTitle = labelForOperation(on: volume.diskInstanceID)
         run(volume.diskInstanceID, displayName: "\(diskTitle) · 卷「\(title)」") { session in
             await session.enableWriting(volume, in: observation, confirmedAsDataVolume: true)
@@ -411,21 +728,28 @@ final class WriteController: ObservableObject {
                     binding: binding
                 ))
             }
+            self.releasePendingVolumes.removeAll { !self.ledger.releasePendingVolumes.contains($0.id) }
+            if self.ledger.releasePendingVolumes.contains(volume), !self.releasePendingVolumes.contains(where: { $0.id == volume }) {
+                self.releasePendingVolumes.append(WriteVolumeRecord(id: volume, title: title, diskTitle: diskTitle, binding: binding))
+            }
         }
+        return true
     }
 
     func safeEject(_ disk: DiskInstanceID, title: String) {
-        let sessionEject = writableVolumes.contains {
+        let sessionEject = sessionVolumes.contains {
             $0.id.diskInstanceID == disk && canEjectSessionVolume($0.id)
         }
-        guard helperState == .enabled, canRequestEject(disk) || sessionEject,
+        guard !isReregisteringHelper, helperState == .enabled, canRequestEject(disk) || sessionEject,
               let observation = latestObservation else { return }
         let displayName = "\(labelForOperation(on: disk)) · 卷「\(title)」"
         run(disk, displayName: displayName) { session in
             await session.safeEject(disk, in: observation)
         } after: { outcome in
             self.ledger.recordEject(outcome, for: disk)
+            let previous = self.sessionVolumes
             self.writableVolumes.removeAll { !self.ledger.writableVolumes.contains($0.id) }
+            self.releasePendingVolumes = previous.filter { self.ledger.releasePendingVolumes.contains($0.id) }
         }
     }
 
@@ -470,6 +794,7 @@ final class WriteController: ObservableObject {
         Task { @MainActor in
             let outcome = await operation(session)
             after(outcome)
+            await operationCompleted()
             busyDisks.remove(disk.physicalDiskID)
             progressByDisk.removeValue(forKey: disk.physicalDiskID)
             lastOutcomeByDisk[disk] = outcome
@@ -477,7 +802,7 @@ final class WriteController: ObservableObject {
             if let lastMessage {
                 let requiresAttention: Bool = switch outcome {
                 case .writingEnabled, .ejected: false
-                case .refused, .needsRefresh: true
+                case .refused, .needsRefresh, .changedAndStopped: true
                 }
                 recordNotice(lastMessage, requiresAttention: requiresAttention)
             }
@@ -496,6 +821,7 @@ struct VolumeWriteActions: View {
     @State private var isConfirmingWrite = false
     @State private var declarationAccepted = false
     @State private var isConfirmingEject = false
+    @State private var writeSubmissionMessage: String?
 
     private var canOfferEject: Bool {
         volume.actions.canSafeEject || controller.canEjectSessionVolume(volume.id)
@@ -599,6 +925,7 @@ struct VolumeWriteActions: View {
         } else if volume.actions.canEnableWriting {
             Button("启用写入") {
                 declarationAccepted = false
+                writeSubmissionMessage = nil
                 isConfirmingWrite = true
             }
             .buttonStyle(.borderedProminent)
@@ -630,13 +957,23 @@ struct VolumeWriteActions: View {
                 .font(.callout)
                 .foregroundStyle(.orange)
                 .fixedSize(horizontal: false, vertical: true)
+            if let writeSubmissionMessage {
+                Text(writeSubmissionMessage)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel(writeSubmissionMessage)
+            }
             HStack {
                 Spacer()
                 Button("取消") { isConfirmingWrite = false }
                     .keyboardShortcut(.cancelAction)
                 Button("确认并启用写入") {
-                    isConfirmingWrite = false
-                    controller.enableWriting(volume.id, title: volume.title)
+                    if controller.enableWriting(volume.id, title: volume.title) {
+                        writeSubmissionMessage = nil
+                        isConfirmingWrite = false
+                    } else {
+                        writeSubmissionMessage = controller.lastMessage
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(!declarationAccepted || !volume.actions.canEnableWriting
@@ -657,20 +994,24 @@ struct WritableVolumesSummary: View {
     @State private var pendingEject: WriteVolumeRecord?
 
     var body: some View {
-        if !controller.writableVolumes.isEmpty || !controller.progressByDisk.isEmpty
+        if !controller.sessionVolumes.isEmpty || !controller.progressByDisk.isEmpty
             || !controller.recentNotices.isEmpty {
             GroupBox("本次会话的操作") {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("会话编号在本次运行期间保持不变，用于区分当前列表可能重新排序的磁盘。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    ForEach(controller.writableVolumes) { record in
+                    ForEach(controller.sessionVolumes) { record in
                         let ejectAvailability = availability(for: record)
                         VStack(alignment: .leading, spacing: 8) {
                             Label(record.displayName, systemImage: "externaldrive.fill")
                                 .fontWeight(.semibold)
                                 .lineLimit(2)
                                 .truncationMode(.middle)
+                            if !controller.isWritable(record.id) {
+                                Text("本次操作未完成，已确认停止。请核验当前挂载状态后安全推出。")
+                                    .font(.callout).foregroundStyle(.secondary)
+                            }
                             ViewThatFits(in: .horizontal) {
                                 HStack(spacing: 8) {
                                     recordActions(record, ejectAvailability: ejectAvailability)

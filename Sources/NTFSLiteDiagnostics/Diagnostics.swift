@@ -124,6 +124,27 @@ public actor Diagnostics {
         return target
     }
 
+    /// Alias selection and recording share one actor turn. A concurrent clear is
+    /// ordered entirely before or after this event, never between registration and record.
+    public func recordDiskOperation(
+        reusing cachedTarget: DiagnosticTarget?,
+        mediaGeneration: UInt64,
+        event: @Sendable (DiagnosticTarget) -> DiagnosticOperationEvent
+    ) throws -> DiagnosticTarget {
+        let target: DiagnosticTarget
+        if let cachedTarget, cachedTarget.runID == runID,
+           cachedTarget.kind == .disk, cachedTarget.mediaGeneration == mediaGeneration,
+           issuedTargets.contains(cachedTarget) {
+            target = cachedTarget
+        } else {
+            target = try registerDisk(mediaGeneration: mediaGeneration)
+        }
+        let operation = event(target)
+        guard operation.target == target else { throw DiagnosticsError.unregisteredTarget }
+        try record(.operation(operation))
+        return target
+    }
+
     public func registerVolume(on disk: DiagnosticTarget) throws -> DiagnosticTarget {
         try validateIssued(disk)
         guard disk.kind == .disk, disk.volumeOrdinal == nil else {

@@ -15,16 +15,31 @@ public struct HelperOwnedMount: Equatable, Sendable {
 /// Primitive release operations; none of them may force an unmount or eject.
 public protocol DiskReleaseSystem: HelperMediaTopologyReading {
     func unmountFileSystem(mountPoint: String) async -> Bool
+    func unmountFileSystemResult(mountPoint: String) async -> HelperDiskOperationResult
     /// Bounded wait for the driver to exit on its own.
     func waitForDriverExit(pid: Int32) async -> Bool
     func removeEmptyMountPoint(_ path: String) async -> Bool
     func unmountNativeVolume(bsdName: String, expectedRegistryEntryID: UInt64) async -> Bool
+    func unmountNativeVolumeResult(bsdName: String, expectedRegistryEntryID: UInt64) async -> HelperDiskOperationResult
     func eject(diskBSDName: String, expectedRegistryEntryID: UInt64) async -> Bool
+    func ejectResult(diskBSDName: String, expectedRegistryEntryID: UInt64) async -> HelperDiskOperationResult
     /// nil means presence could not be established; only an explicit false is absence.
     func diskIsPresent(bsdName: String, registryEntryID: UInt64) async -> Bool?
     /// Our driver's mounts whose partition device on `diskBSDName` no longer exists.
     func orphanedMounts(diskBSDName: String) async -> [HelperOwnedMount]?
     func pause() async
+}
+
+public extension DiskReleaseSystem {
+    func unmountFileSystemResult(mountPoint: String) async -> HelperDiskOperationResult {
+        await unmountFileSystem(mountPoint: mountPoint) ? .succeeded : .unknown
+    }
+    func unmountNativeVolumeResult(bsdName: String, expectedRegistryEntryID: UInt64) async -> HelperDiskOperationResult {
+        await unmountNativeVolume(bsdName: bsdName, expectedRegistryEntryID: expectedRegistryEntryID) ? .succeeded : .unknown
+    }
+    func ejectResult(diskBSDName: String, expectedRegistryEntryID: UInt64) async -> HelperDiskOperationResult {
+        await eject(diskBSDName: diskBSDName, expectedRegistryEntryID: expectedRegistryEntryID) ? .succeeded : .unknown
+    }
 }
 
 public enum DiskReleaseFailure: Int32, Sendable {
@@ -42,6 +57,7 @@ public enum DiskReleaseFailure: Int32, Sendable {
 
 public enum DiskReleaseExecutor {
     static let ejectConfirmationPolls = 40
+    private static let releaseFactSamples = 5
 
     public static func unmountVolume(target: HelperVolumeInstanceIdentity, system: DiskReleaseSystem) async -> HelperResponseEnvelope {
         let bsd = target.volumeBSDName
@@ -127,8 +143,10 @@ public enum DiskReleaseExecutor {
                     }
                 }
             }
-            guard await system.eject(diskBSDName: disk, expectedRegistryEntryID: target.registryEntryID) else {
-                return changed(.ejectRefused)
+            switch await system.ejectResult(diskBSDName: disk, expectedRegistryEntryID: target.registryEntryID) {
+            case .succeeded: break
+            case .refused: return stopped(.ejectRefused)
+            case .unknown: return changed(.ejectRefused)
             }
             var consecutiveAbsence = 0
             for _ in 0..<ejectConfirmationPolls {
@@ -153,15 +171,22 @@ public enum DiskReleaseExecutor {
         guard let owned = await system.ownedFSKitMounts(devicePath: "/dev/" + bsd) else { return failed(.factsUnavailable) }
         guard owned == partition.ownedMounts else { return failed(.ambiguousMount) }
         if let mount = owned.first {
-            guard await system.unmountFileSystem(mountPoint: mount.mountPoint) else { return changed(.unmountRefused) }
+            switch await system.unmountFileSystemResult(mountPoint: mount.mountPoint) {
+            case .succeeded: break
+            case .refused: return stopped(.unmountRefused)
+            case .unknown: return changed(.unmountRefused)
+            }
             guard await system.waitForDriverExit(pid: mount.driverPID) else { return changed(.driverNotExited) }
             guard await system.removeEmptyMountPoint(mount.mountPoint) else { return changed(.mountPointNotRemoved) }
             return nil
         }
         if let mountPoint = partition.facts.mountPoint, !mountPoint.isEmpty {
-            guard await system.unmountNativeVolume(
-                bsdName: bsd, expectedRegistryEntryID: partition.registryEntryID
-            ) else { return changed(.unmountRefused) }
+            switch await system.unmountNativeVolumeResult(
+                bsdName: bsd, expectedRegistryEntryID: partition.registryEntryID) {
+            case .succeeded: break
+            case .refused: return stopped(.unmountRefused)
+            case .unknown: return changed(.unmountRefused)
+            }
         }
         return nil
     }
@@ -170,18 +195,26 @@ public enum DiskReleaseExecutor {
         target: HelperDiskInstanceIdentity, selectedVolumeBSDName: String? = nil,
         system: DiskReleaseSystem
     ) async -> HelperResponseEnvelope {
-        switch await HelperTopologyVerifier.verify(
-            target, selectedVolumeBSDName: selectedVolumeBSDName, system: system
-        ) {
-        case let .failure(failure):
-            return changed(topologyFailure(failure))
-        case let .success(partitions):
-            let checked = selectedVolumeBSDName.map { bsd in partitions.filter { $0.bsdName == bsd } } ?? partitions
-            guard !checked.isEmpty,
-                  checked.allSatisfy({ $0.ownedMounts.isEmpty && ($0.facts.mountPoint?.isEmpty ?? true) })
-            else { return changed(.stillMounted) }
-            return succeeded
+        // Completed standard unmount can race DA/process-resource updates. Keep
+        // the execution lease and acquire entirely fresh proof; never replay the
+        // unmount, driver wait, directory removal or eject while facts settle.
+        for sample in 0..<releaseFactSamples {
+            switch await HelperTopologyVerifier.verify(
+                target, selectedVolumeBSDName: selectedVolumeBSDName, system: system
+            ) {
+            case .failure(.factsUnavailable) where sample + 1 < releaseFactSamples:
+                await system.pause()
+            case let .failure(failure):
+                return changed(topologyFailure(failure))
+            case let .success(partitions):
+                let checked = selectedVolumeBSDName.map { bsd in partitions.filter { $0.bsdName == bsd } } ?? partitions
+                guard !checked.isEmpty,
+                      checked.allSatisfy({ $0.ownedMounts.isEmpty && ($0.facts.mountPoint?.isEmpty ?? true) })
+                else { return changed(.stillMounted) }
+                return succeeded
+            }
         }
+        return changed(.factsUnavailable)
     }
 
     private static func verifiedPartitions(
@@ -213,6 +246,10 @@ public enum DiskReleaseExecutor {
 
     private static func failed(_ failure: DiskReleaseFailure) -> HelperResponseEnvelope {
         HelperResponseEnvelope(resultCode: .executionFailed, exitStatus: failure.rawValue)
+    }
+
+    private static func stopped(_ failure: DiskReleaseFailure) -> HelperResponseEnvelope {
+        HelperResponseEnvelope(resultCode: .stateChangedQuiescent, exitStatus: failure.rawValue)
     }
 
     private static func changed(_ failure: DiskReleaseFailure) -> HelperResponseEnvelope {

@@ -106,19 +106,55 @@ public enum HelperProcessInventorySettlement {
 }
 
 public enum HelperProcessInspectionPolicy {
-    public static func mayIgnoreUnreadableProcess(errno code: Int32, confirmedZombie: Bool? = nil) -> Bool {
+    public static func mayIgnoreUnreadableProcess(
+        errno code: Int32, confirmedZombie: Bool? = nil,
+        pathError: Int32? = nil, confirmedNoDeviceHandles: Bool? = nil
+    ) -> Bool {
         code == ESRCH || (code == 0 && confirmedZombie == true)
+            || (code == 0 && pathError == ENOENT && confirmedNoDeviceHandles == true)
+    }
+
+    public static func isNonDeviceVnode(mode: UInt16, device: UInt32, nullDevice: UInt32) -> Bool {
+        let kind = mode & UInt16(S_IFMT)
+        return kind == UInt16(S_IFREG) || kind == UInt16(S_IFDIR)
+            || (kind == UInt16(S_IFCHR) && device == nullDevice)
+    }
+}
+
+/// One complete kernel-only observation; construction follows successful full enumeration.
+public struct HelperDiskPresenceSnapshot: Equatable, Sendable {
+    public let deviceNodeExists: Bool
+    public let bsdNames: Set<String>
+    public let registryEntryIDs: Set<UInt64>
+
+    public init(deviceNodeExists: Bool, bsdNames: Set<String>, registryEntryIDs: Set<UInt64>) {
+        self.deviceNodeExists = deviceNodeExists
+        self.bsdNames = bsdNames
+        self.registryEntryIDs = registryEntryIDs
     }
 }
 
 public enum HelperDiskPresencePolicy {
     public static func isPresent(
-        deviceNodeExists: Bool?, bsdNameInRegistry: Bool?,
-        requestedEntryInRegistry: Bool?, diskArbitrationHasDisk: Bool?
+        deviceNodeExists: Bool?, bsdNameInRegistry: Bool?, requestedEntryInRegistry: Bool?
     ) -> Bool? {
-        let evidence = [deviceNodeExists, bsdNameInRegistry, requestedEntryInRegistry, diskArbitrationHasDisk]
+        let evidence = [deviceNodeExists, bsdNameInRegistry, requestedEntryInRegistry]
         if evidence.contains(where: { $0 == true }) { return true }
         return evidence.allSatisfy { $0 == false } ? false : nil
+    }
+
+    /// Reference allocation by Disk Arbitration is not a presence observation.
+    /// Absence needs two identical complete kernel snapshots, including the original ID.
+    public static func isPresent(
+        bsdName: String, registryEntryID: UInt64,
+        first: HelperDiskPresenceSnapshot?, second: HelperDiskPresenceSnapshot?
+    ) -> Bool? {
+        guard registryEntryID > 0,
+              bsdName.range(of: #"^disk[0-9]+$"#, options: .regularExpression) != nil,
+              let first, let second, first == second else { return nil }
+        return isPresent(deviceNodeExists: first.deviceNodeExists,
+                         bsdNameInRegistry: first.bsdNames.contains(bsdName),
+                         requestedEntryInRegistry: first.registryEntryIDs.contains(registryEntryID))
     }
 }
 
