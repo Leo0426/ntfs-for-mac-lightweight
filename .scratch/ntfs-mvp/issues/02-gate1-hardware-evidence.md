@@ -3,7 +3,7 @@
 Status: ready-for-human
 Labels: enhancement, ready-for-human
 Assignee:
-Blocked-by: 01-complete-observation-proof, 09-trusted-protected-volume-role, 16-read-only-unknown-role-candidate, 17-current-connection-data-declaration
+Blocked-by:
 
 ## 验收
 

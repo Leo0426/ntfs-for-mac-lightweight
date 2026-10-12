@@ -3,7 +3,7 @@
 Status: ready-for-human
 Labels: enhancement, ready-for-human
 Assignee:
-Blocked-by: 02-gate1-hardware-evidence, 07-bounded-setup-probes, 08-ejectability-facts, 10-mount-engine-contract, 11-exact-macfuse-trust-policy, 15-macfuse-signing-evidence-policy, 17-current-connection-data-declaration, 18-candidate-scoped-conflict-footprint-probe, 22-bind-macfuse-version-and-signature-same-entry
+Blocked-by: 02-gate1-hardware-evidence
 
 ## 验收
 
@@ -20,4 +20,4 @@ Blocked-by: 02-gate1-hardware-evidence, 07-bounded-setup-probes, 08-ejectability
 
 ## 评论
 
-当前正式 App 的信任策略故意为空，Setup 必须保持未就绪。
+正式 App 已有固定本机信任策略和运行探针；当前缺口是完整 Gate 2 矩阵，不能再以策略为空描述当前实现。

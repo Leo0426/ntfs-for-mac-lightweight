@@ -10,7 +10,7 @@ status: accepted
 `SMAppService` 注册的 launchd daemon helper，经 XPC 传递 ADR 0002 的结构化一次性协议；
 应用与 helper 使用用户的 Apple 开发者签名身份互相校验。
 
-该决定依据 [USB 本机闭环结果](../../.scratch/write-delete-validation/USB-RESULT.md)：
+该决定依据 [USB 本机闭环结果](../release/local-validation.md)：
 macOS 27.0 + macFUSE 5.4.0 FSKit local + 固定摘要 NTFS-3G 2026.7.7 永久降权驱动，在真实 U 盘
 上完成可写挂载、33 项写删、4 GiB + 1 字节数据集、重挂载独立读回与标准卸载。
 

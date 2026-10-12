@@ -13,11 +13,13 @@ Apple 的公开接口没有保证其他 Team 的模块对当前调用方可见�
 这保证失败关闭，但可能拒绝实际可用的环境。驱动与健康探针另由 helper 核对固定签名，
 目标磁盘拓扑在异步检查后重新核对。
 
-## 本机只读结果与边界
+## 历史只读结果与边界
+
+以下是 2026-09-30 及更早的诊断过程，所述等待、旧版本门禁与可见范围缺口不代表当前待办；当前验证见[本机验证与剩余限制](../release/local-validation.md)。
 
 同日使用本项目 Apple Development Team 签名的只读探针，以当前 uid 501 调用上述 API，
 返回 Apple 自带模块，没有返回目标 macFUSE 模块；`pluginkit` 能列出目标模块，但没有显式
-`use` 标记。此前[一次性镜像诊断](../../.scratch/write-delete-validation/FSKIT-DIAGNOSIS.md)
+`use` 标记。此前[一次性镜像诊断](../release/local-validation.md)
 记录了同样无 `use` 标记且 ad-hoc FSClient 未观察到目标模块时，uid 501 仍成功完成 FSKit
 镜像挂载。两种枚举都不能单独证明目标模块不可用。此次仅运行只读 API 探针，未运行真实
 挂载、卸载、推出或写入。受保护部署后的 helper 用户子进程是否有不同可见范围尚未验证。
@@ -40,7 +42,7 @@ macFUSE 维护者对 FSKit/PluginKit 不一致的类似报告给出
 [官方排查页面](https://github.com/macfuse/macfuse/wiki/Troubleshooting) 重建当前用户的
 LaunchServices 登记数据库并立即重启；其步骤影响整位用户的应用、扩展与打开方式目录。
 本轮没有执行该全局删除或重启，等待用户选择。具体记录见
-[本机诊断](../../.scratch/write-identity-bug/RESULT.md)。
+[本机诊断](../release/local-validation.md)。
 
 ## 2026-09-30 重启后镜像对照
 
@@ -57,6 +59,6 @@ challenge 通过。用户再次确认按类别中的 local 开关开启。受信
 没有执行物理盘挂载、卸载、推出或写删。正式签名驱动的相同路径和 Windows 仍须分别验证。
 
 建议以正式 helper 自身完成的、固定一次性镜像挂载与完整收尾正证据代替外部 Team 枚举硬门禁。
-[设计](../../.scratch/fskit-runtime-preflight-fix/DESIGN.md) 已获用户批准；正式实现按
+正式实现按
 [ADR 0013](../adr/0013-verify-runtime-with-disposable-image.md) 改为每次独立镜像预检。
 0.1.4（5）不再用跨 Team 模块枚举作为写入硬门禁；安装件实测结果另列。

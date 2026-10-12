@@ -71,7 +71,7 @@ macOS 只读挂载，`MediaContent` 为 Microsoft Basic Data GPT 类型 GUID
 `VolumeUUID`；这再次说明两种 UUID 字段不能混用。`disk6` 与卷名只是当次显示和检查线索，
 不构成跨重插身份。上述观察是一次性即时读取，未封存为独立 Gate 证据，也没有从这些读数
 推断写入或整盘推出资格。此前可牺牲介质的写入实验记录见
-[USB 本机结果](../../.scratch/write-delete-validation/USB-RESULT.md)。
+[USB 本机结果](../release/local-validation.md)。
 
 后续同日只读核对确认：整盘 DA `MediaContent` 为 `GUID_partition_scheme`；EFI 与 NTFS
 分区的 IOMedia `Content Hint` 分别匹配上述 EFI 和 Microsoft Basic Data GUID，且各自与

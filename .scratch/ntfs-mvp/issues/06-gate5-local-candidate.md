@@ -14,4 +14,4 @@ Blocked-by: 02-gate1-hardware-evidence, 03-gate2-image-and-dependencies, 04-gate
 
 ## 评论
 
-当前仅有 ad-hoc 签名的只读开发包，不是 Gate 5 候选。
+已有签名本机 App/helper/pkg 与离线核验；Developer ID、公证和完整长期验收尚未完成，不是 Gate 5 候选。

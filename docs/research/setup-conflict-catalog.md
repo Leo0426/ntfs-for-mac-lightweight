@@ -161,9 +161,7 @@ UI 只能显示“已检查 Gate 2 候选范围”，不能显示“未安装任
 
 ## 实现状态（2026-08-31）
 
-上述调研当时发现的软件缺口已由
-[`Issue 18`](../../.scratch/ntfs-mvp/issues/18-candidate-scoped-conflict-footprint-probe.md)
-关闭：
+上述调研当时发现的软件缺口已在已结案 Issue 18 中实现（可从 Git 历史追溯）：
 
 - `ConflictCatalogScope` 已绑定 scope ID、目标 macOS/架构、证据日期、三个候选制品的
   版本与 SHA-256、精确 loaded identifier 和固定 installed footprint。

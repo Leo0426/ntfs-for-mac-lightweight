@@ -30,7 +30,7 @@ NTFS driver/probe、无 pending DA；全部成立才确认。失败仅撤销此�
 与安装离线回归不能由 ad-hoc 只读包 PASS 替代。
 
 永久 runtime 残留资格、跨源结束/唤醒/重启恢复、BSD driver 打开竞态、Windows 与长期兼容性未因
-本决定通过。本次修改必须以 .scratch/full-repair-2026-10-10 的自动与实物结果分别证明，不从代码推断实测。
+本决定通过。自动与实物覆盖范围见[本机验证记录](../release/local-validation.md)，不从代码推断实测；原始本机证据保留本地。
 
 2026-10-10 实盘增量：DADiskCreateFromBSDName 对已不存在的 BSD 名仍可分配 reference，不能作为存在事实。标准推出后的缺席确认只接受两份完整且相同的当前内核快照：设备节点、IOMedia BSD 名集合与 Registry ID 集合；节点前后或枚举变化、失败均未知。原 Registry ID 或同名新设备仍存在时不得确认推出。
 

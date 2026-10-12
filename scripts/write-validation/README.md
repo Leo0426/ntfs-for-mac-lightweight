@@ -59,7 +59,7 @@ python3 -m unittest discover -s scripts/write-validation -p 'test_*.py' -v
 ```
 
 这些检查只在系统临时目录运行；它们已纳入 `scripts/check.sh`。真实 NTFS 执行状态见
-[实验记录](../../.scratch/write-delete-validation/PLAN.md)。
+[实验记录](../../docs/release/local-validation.md)。
 
 ## 只读 FSKit 注册诊断（macOS）
 
@@ -94,7 +94,7 @@ swiftc -O -warnings-as-errors -parse-as-library \
 `mountVerified: false`、`writeAuthorized: false`，不能作为写入资格。
 需结合 PlugInKit、macFUSE 自身的日志和实际挂载事实独立诊断。
 当前故障、重启后复测与已尝试的修复见
-[FSKit 诊断记录](../../.scratch/write-delete-validation/FSKIT-DIAGNOSIS.md)。
+[FSKit 诊断记录](../../docs/release/local-validation.md)。
 
 ## 固定 USB 的管理员执行入口
 
@@ -133,7 +133,7 @@ USB 写入证据或允许接入正式 App。
 
 ### USB 全流程（永久降权候选）
 
-镜像写删与重挂载已通过，见 [镜像结果](../../.scratch/write-delete-validation/IMAGE-RESULT.md)。
+镜像写删与重挂载已通过，见 [镜像结果](../../docs/release/local-validation.md)。
 `usb_lab.py` 仅匹配本次已授权的 U310（32,212,254,720 字节）及其既定 NTFS/EFI 分区组合。
 私有分区标识位于已忽略的 `.build/write-validation/approved-usb-target.json`，文件的 SHA-256
 固定在源代码中；修改回执、目标缺失/重复、额外分区、同盘 EFI 已挂载或身份矛盾都会拒绝。

@@ -193,8 +193,8 @@ _Avoid_: Trusted Snapshot, Persistent Allowlist, Write Capability
 2026-09-09 起按 [ADR 0009](docs/adr/0009-isolate-local-write-validation.md) 使用独立
 `scripts/write-validation/` 文件语义库验证可牺牲介质。该库没有挂载资格判断或系统执行器，
 调用方负责确认目标与实际可写挂载；临时目录检查不能证明 NTFS 通过。Windows 复核按用户
-要求后置，实验结果不改变正式应用只读边界或 Gate 状态。当前证据见
-[实验计划](.scratch/write-delete-validation/PLAN.md)。
+要求后置，实验结果不自动扩大发布资格或改变 Gate 状态。当前证据见
+[本机验证与剩余限制](docs/release/local-validation.md)。
 
 实验文件检查清单可以独占保存为有界规范 JSON 与 SHA-256，供新进程只读复验；摘要只检测
 内容损坏，不认证清单来源、绑定目标卷或授权清理。清单加载与文件复验分别报告失败阶段，
